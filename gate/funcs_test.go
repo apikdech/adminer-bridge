@@ -169,3 +169,41 @@ func TestBlocked(t *testing.T) {
 		}
 	}
 }
+
+// Unqualified calls are rewritten to pg_catalog so that Postgres cannot
+// resolve them to a same-named function in another schema on the
+// search_path (for example a user-defined public.lower(integer)).
+func TestValidateQualifiesFunctionCalls(t *testing.T) {
+	cases := []struct{ sql, want string }{
+		{"select lower('A')", "SELECT pg_catalog.lower('A')"},
+		{"select count(*) from users", "SELECT pg_catalog.count(*) FROM users"},
+		{"select row_number() over (order by id) from users",
+			"SELECT pg_catalog.row_number() OVER (ORDER BY id) FROM users"},
+		{"select pg_catalog.lower('A')", "SELECT pg_catalog.lower('A')"},
+		{"select * from users where lower(name) in (select lower(name) from users)",
+			"SELECT * FROM users WHERE pg_catalog.lower(name) IN (SELECT pg_catalog.lower(name) FROM users)"},
+		{"explain select count(*) from users", "EXPLAIN SELECT pg_catalog.count(*) FROM users"},
+	}
+	for _, c := range cases {
+		t.Run(c.sql, func(t *testing.T) {
+			got, err := Validate(c.sql, testFuncs)
+			if err != nil {
+				t.Fatalf("Validate(%q) = %v", c.sql, err)
+			}
+			if got != c.want {
+				t.Fatalf("Validate(%q) = %q, want %q", c.sql, got, c.want)
+			}
+		})
+	}
+}
+
+func TestValidateQualifiedOutputStillGated(t *testing.T) {
+	// Rewriting must not hide a call from the rules: the blocklist and
+	// allowlist run before the rewrite.
+	for _, sql := range []string{"select pg_sleep(1)", "select my_func()"} {
+		var re *RejectError
+		if _, err := Validate(sql, testFuncs); !errors.As(err, &re) || re.Rule != RuleFunction {
+			t.Fatalf("Validate(%q) = %v, want function_not_allowed", sql, err)
+		}
+	}
+}
