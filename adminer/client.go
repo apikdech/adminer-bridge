@@ -310,8 +310,13 @@ func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([
 		}
 		expired := p.kind == PageLogin
 		if expired && nonDefault && !strings.Contains(p.pageErr, sessionExpiredMarker) {
-			// Adminer restarted the session; the token is gone with it.
+			// Adminer's auth_error ran set_password(null): the session is
+			// logged out of every database, but $_SESSION["token"] stays
+			// set, so a token GET (a username= request) would count as
+			// another failed login. Forget the session so the next Exec
+			// logs in directly; a login POST is not counted.
 			c.token = ""
+			c.loggedIn = false
 			err := fmt.Errorf("environment %q: database %q: %w: adminer answered with the login page%s; not logging in again",
 				c.env.Name, database, ErrDatabase, suffix(p.pageErr))
 			c.dbErr[database] = dbLatch{err: err, at: c.now()}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -55,6 +56,7 @@ type fake struct {
 	procs     []string
 	dbProcs   map[string][]string // per-database procs; overrides procs when set
 	missing   map[string]bool     // databases the preflight does not find
+	dbErr     map[string]error    // error for every batch sent to that database
 	super     string
 	exts      []string
 	langs     []string
@@ -86,6 +88,12 @@ func (f *fake) Exec(ctx context.Context, db, batch string, limit int) ([]adminer
 		time.Sleep(f.delay)
 	}
 	stmt := stmtOf(batch)
+	f.mu.Lock()
+	dbErr := f.dbErr[db]
+	f.mu.Unlock()
+	if dbErr != nil {
+		return nil, dbErr
+	}
 	blocks, err := f.answer(db, stmt, limit)
 	// Fill wrapper echoes from the batch actually sent.
 	parts := strings.Split(batch, ";\n")
@@ -831,5 +839,99 @@ func TestPreflightStatementPassesGate(t *testing.T) {
 	}
 	if !strings.Contains(q, "'o''brien'") {
 		t.Errorf("name not quoted: %s", q)
+	}
+}
+
+func countStmts(f *fake, marker, db string) int {
+	n := 0
+	for _, c := range f.calls {
+		if strings.Contains(stmtOf(c.batch), marker) && c.db == db {
+			n++
+		}
+	}
+	return n
+}
+
+// errDB mimics the client's ErrDatabase wrapping.
+func errDB(db string) error {
+	return fmt.Errorf("environment %q: database %q: %w: adminer answered with the login page", "dev", db, adminer.ErrDatabase)
+}
+
+// After Adminer fails to open a database, the next call must run the
+// zero-strike preflight again instead of sending the name to Adminer.
+func TestDatabaseErrorResetsPreflight(t *testing.T) {
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	ctx := context.Background()
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.dbErr = map[string]error{"db2": errDB("db2")}
+	_, err := b.Query(ctx, "dev", "db2", "select 1", 0)
+	if !errors.Is(err, adminer.ErrDatabase) || !strings.Contains(err.Error(), `"db2"`) {
+		t.Fatalf("err = %v, want ErrDatabase", err)
+	}
+	if d := b.ListEnvironments()[0].Databases[1]; d.Connected {
+		t.Errorf("db2 = %+v, want not connected after ErrDatabase", d)
+	}
+	// The database is gone now: the preflight catches it, nothing goes to db2.
+	f.dbErr = nil
+	f.missing = map[string]bool{"db2": true}
+	sent := countStmts(f, "", "db2")
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err == nil || err.Error() != missingErr {
+		t.Fatalf("err = %v, want %q", err, missingErr)
+	}
+	if n := countStmts(f, "", "db2"); n != sent {
+		t.Errorf("batches to db2 after reset = %d, want 0", n-sent)
+	}
+	if n := countStmts(f, "pg_database", "db"); n != 2 {
+		t.Errorf("preflights = %d, want 2", n)
+	}
+	// The default database keeps its state.
+	if !b.ListEnvironments()[0].Databases[0].Connected {
+		t.Error("default database lost its state")
+	}
+}
+
+func TestDatabaseErrorDuringInitResetsPreflight(t *testing.T) {
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	ctx := context.Background()
+	if _, err := b.Query(ctx, "dev", "", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.dbErr = map[string]error{"db2": errDB("db2")}
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); !errors.Is(err, adminer.ErrDatabase) {
+		t.Fatalf("err = %v, want ErrDatabase", err)
+	}
+	f.dbErr = nil
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := countStmts(f, "pg_database", "db"); n != 2 {
+		t.Errorf("preflights = %d, want 2 (re-run after ErrDatabase in init)", n)
+	}
+	if n := countStmts(f, "pg_proc", "db2"); n != 2 {
+		t.Errorf("db2 FuncSet loads = %d, want 2", n)
+	}
+}
+
+func TestOtherErrorKeepsPreflight(t *testing.T) {
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	ctx := context.Background()
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.dbErr = map[string]error{"db2": errors.New("adminer request failed: timeout")}
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err == nil {
+		t.Fatal("want error")
+	}
+	f.dbErr = nil
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := countStmts(f, "pg_database", "db"); n != 1 {
+		t.Errorf("preflights = %d, want 1", n)
 	}
 }
