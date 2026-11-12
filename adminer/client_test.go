@@ -43,6 +43,7 @@ type fakeAdminer struct {
 	logins     int
 	batches    []recorded
 	events     []string // "login" or "GET ?query" in arrival order
+	failGets   int      // the next failGets GETs answer 502 (no SQL page)
 }
 
 func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +98,10 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		serve(f.batchPages[i])
 	default:
-		if f.loginPage != "" {
+		if f.failGets > 0 {
+			f.failGets--
+			serve("raw:502:<html><body>Bad Gateway</body></html>")
+		} else if f.loginPage != "" {
 			serve(f.loginPage)
 		} else if f.loggedIn {
 			serve("sql_page.html")
@@ -347,5 +351,58 @@ func TestLoginFailureLatchedForCooldown(t *testing.T) {
 	}
 	if f.logins != 2 {
 		t.Errorf("logins = %d after cooldown, want 2", f.logins)
+	}
+}
+
+// stuckClient leaves c with no CSRF token after a successful login: the
+// token refetch after an invalid-CSRF answer fails, then Adminer's session
+// expires. This is the state that used to fail every later Exec.
+func stuckClient(t *testing.T) (*Client, *fakeAdminer) {
+	t.Helper()
+	f := &fakeAdminer{batchPages: []string{"ok.html", "bad_token.html", "ok.html"}}
+	c, _ := newTestClient(t, f)
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.failGets = 1
+	f.mu.Unlock()
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err == nil {
+		t.Fatal("token refetch should have failed")
+	}
+	f.mu.Lock()
+	f.loggedIn = false // the Adminer session expires
+	f.mu.Unlock()
+	if f.logins != 1 {
+		t.Fatalf("setup logins = %d, want 1", f.logins)
+	}
+	return c, f
+}
+
+func TestExecRecoversWhenTokenFetchFindsLoginPage(t *testing.T) {
+	c, f := stuckClient(t)
+	for i := range 3 {
+		if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+			t.Fatalf("Exec %d: %v", i, err)
+		}
+	}
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2 (one re-login, then session reuse)", f.logins)
+	}
+}
+
+func TestExecRecoveryLoginFailureNotRetried(t *testing.T) {
+	c, f := stuckClient(t)
+	f.mu.Lock()
+	f.loginPage = "login_failed.html"
+	f.mu.Unlock()
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) {
+		t.Fatalf("err = %v, want ErrLogin", err)
+	}
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("second err = %v, want latched ErrLogin", err)
+	}
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2 (one recovery login, never retried)", f.logins)
 	}
 }

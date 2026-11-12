@@ -171,10 +171,14 @@ func (c *Client) fetchToken(ctx context.Context) (loginPage bool, err error) {
 	return false, nil
 }
 
-// refreshToken fetches a CSRF token, logging in first when asked to. A login
-// page after that is ErrLogin: the login did not take.
-func (c *Client) refreshToken(ctx context.Context, doLogin bool) error {
+// refreshToken fetches a CSRF token, logging in first when asked to. If the
+// fetch finds the login page (the session is gone) and no login has been
+// attempted in this Exec call yet, it logs in once and fetches again. A login
+// page after a login is ErrLogin: the login did not take. *loginTried records
+// the login attempt for the calling Exec.
+func (c *Client) refreshToken(ctx context.Context, doLogin bool, loginTried *bool) error {
 	if doLogin {
+		*loginTried = true
 		if err := c.login(ctx); err != nil {
 			return err
 		}
@@ -182,6 +186,17 @@ func (c *Client) refreshToken(ctx context.Context, doLogin bool) error {
 	isLogin, err := c.fetchToken(ctx)
 	if err != nil {
 		return err
+	}
+	if isLogin && !*loginTried {
+		// The client holds a session cookie here, so this login POST is not
+		// counted by Adminer's failed-login throttle.
+		*loginTried = true
+		if err := c.login(ctx); err != nil {
+			return err
+		}
+		if isLogin, err = c.fetchToken(ctx); err != nil {
+			return err
+		}
 	}
 	if isLogin {
 		return fmt.Errorf("environment %q: %w: adminer session not established", c.env.Name, ErrLogin)
@@ -228,10 +243,11 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	loginTried := false
 	if c.token == "" {
 		// Without a session, log in directly: a request carrying username=
 		// but no session cookie counts as a failed login to Adminer's throttle.
-		if err := c.refreshToken(ctx, !c.loggedIn); err != nil {
+		if err := c.refreshToken(ctx, !c.loggedIn, &loginTried); err != nil {
 			return nil, err
 		}
 	}
@@ -261,7 +277,7 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 		}
 		retried = true
 		c.token = ""
-		if err := c.refreshToken(ctx, expired); err != nil {
+		if err := c.refreshToken(ctx, expired, &loginTried); err != nil {
 			return nil, err
 		}
 	}
