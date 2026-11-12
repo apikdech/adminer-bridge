@@ -195,12 +195,14 @@ func (b *Bridge) query(ctx context.Context, env, database, sql string, limit int
 			}
 		}
 		if err := st.init(ctx, ds); err != nil {
+			st.forgetOnDatabaseError(ds, err)
 			return nil, fmt.Errorf("environment %q, database %q: first connect failed: %w", env, ds.name, err)
 		}
 	}
 
 	res, err := st.run(ctx, ds.name, sql, ds.funcs, limit)
 	if err != nil {
+		st.forgetOnDatabaseError(ds, err)
 		var rej *gate.RejectError
 		if errors.As(err, &rej) {
 			return nil, err
@@ -243,6 +245,18 @@ func (b *Bridge) preflight(ctx context.Context, st *envState, ds *dbState) error
 	}
 	ds.found, ds.missingErr = true, nil
 	return nil
+}
+
+// forgetOnDatabaseError resets a non-default database after Adminer failed
+// to open it (adminer.ErrDatabase), so the next call runs the preflight and
+// init again instead of sending the name to Adminer. Called with st.mu held.
+func (st *envState) forgetOnDatabaseError(ds *dbState, err error) {
+	if ds.name == st.env.Database || !errors.Is(err, adminer.ErrDatabase) {
+		return
+	}
+	ds.found = false
+	ds.funcs = nil
+	ds.info.Store(nil)
 }
 
 // ListEnvironments describes every environment, sorted by name, with its

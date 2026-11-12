@@ -47,6 +47,8 @@ type fakeAdminer struct {
 	events     []string          // "login" or "GET ?query" in arrival order
 	failGets   int               // the next failGets GETs answer 502 (no SQL page)
 	dbPages    map[string]string // fixture for any request whose db= is a key (Adminer cannot open that database)
+	strikes    int               // requests Adminer counts as failed logins (add_invalid_login)
+	pwCleared  bool              // a database failure cleared the stored password; GETs show the login page until a login POST
 }
 
 func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -82,10 +84,23 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if page, ok := f.dbPages[r.URL.Query().Get("db")]; ok && r.URL.Query().Has("sql") {
+		// auth_error's strike branch: add_invalid_login and
+		// set_password(null). $_SESSION["token"] stays set.
 		if r.Method == http.MethodPost {
 			f.batches = append(f.batches, rec)
 		}
+		f.strikes++
+		f.pwCleared = true
 		serve(page)
+		return
+	}
+	if f.pwCleared && r.Method == http.MethodGet && r.URL.Query().Has("username") {
+		// The token is still in the session but the password is gone:
+		// auth_error's strike branch again.
+		f.strikes++
+		page := strings.Replace(string(fixture(f.t, "login_failed.html")),
+			"Session expired, please login again.", "Invalid credentials.", 1)
+		serve("raw:403:" + page)
 		return
 	}
 
@@ -100,6 +115,7 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.loggedIn = true
+		f.pwCleared = false
 		http.Redirect(w, r, "/", http.StatusFound)
 	case r.Method == http.MethodPost:
 		f.batches = append(f.batches, rec)
@@ -562,12 +578,18 @@ func TestExecNonDefaultDatabaseLoginPageNoRelogin(t *testing.T) {
 	if len(f.batches) != n+1 {
 		t.Errorf("batch posts after cooldown = %d, want 1", len(f.batches)-n)
 	}
-	if f.logins != 1 {
-		t.Errorf("logins = %d, want 1", f.logins)
+	// Two logins: the first, and the direct login before the default
+	// database call that followed the failure. No re-login for broken.
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2", f.logins)
+	}
+	// One strike per request that reached the broken database, none more.
+	if f.strikes != 2 {
+		t.Errorf("strikes = %d, want 2 (one per broken batch)", f.strikes)
 	}
 }
 
-func TestExecNonDefaultDatabaseFailureClearsToken(t *testing.T) {
+func TestExecNonDefaultDatabaseFailureLogsInDirectly(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": dbErrorPage(t)}}
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
@@ -577,25 +599,22 @@ func TestExecNonDefaultDatabaseFailureClearsToken(t *testing.T) {
 	if _, err := c.Exec(ctx, "broken", "SELECT 1", 0); !errors.Is(err, ErrDatabase) {
 		t.Fatalf("err = %v", err)
 	}
-	// Adminer restarts the session on a database failure, so the next Exec
-	// must fetch a new token first.
-	gets := 0
-	for _, e := range f.events {
-		if strings.HasPrefix(e, "GET") && strings.Contains(e, "sql=") {
-			gets++
-		}
-	}
+	// Adminer's set_password(null) logged the session out of every
+	// database, but $_SESSION["token"] is still set: a token GET would hit
+	// auth_error's strike branch again. The next Exec must log in first.
+	mark := len(f.events)
 	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {
 		t.Fatal(err)
 	}
-	after := 0
-	for _, e := range f.events {
-		if strings.HasPrefix(e, "GET") && strings.Contains(e, "sql=") {
-			after++
-		}
+	next := f.events[mark:]
+	if len(next) == 0 || next[0] != "login" {
+		t.Errorf("requests after the failure = %q, want a login first", next)
 	}
-	if after != gets+1 {
-		t.Errorf("token GETs after the failure = %d, want 1", after-gets)
+	if f.strikes != 1 {
+		t.Errorf("strikes = %d, want 1 (only the broken batch)", f.strikes)
+	}
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2", f.logins)
 	}
 }
 
