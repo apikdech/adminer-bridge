@@ -35,6 +35,11 @@ func (fakeExec) Exec(_ context.Context, batch string, _ int) ([]adminer.Block, e
 		main.Rows = val("f")
 	case strings.Contains(stmt, "pg_extension"), strings.Contains(stmt, "pg_language"):
 		main.Rows = nil
+	case strings.Contains(stmt, "null_vs_text"):
+		// An SQL NULL cell and a text cell that reads "NULL".
+		s := "NULL"
+		main.Columns = []string{"a", "null_vs_text"}
+		main.Rows = [][]*string{{nil, &s}}
 	}
 	blocks = append(blocks, main, adminer.Block{SQL: "ROLLBACK", Kind: adminer.KindMessage, Message: "ok"})
 	return blocks, nil
@@ -136,5 +141,25 @@ func TestListEnvironmentsAndCatalogTools(t *testing.T) {
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_tables", Arguments: map[string]any{"env": "dev"}})
 	if err != nil || res.IsError {
 		t.Fatalf("list_tables: %v %+v", err, res)
+	}
+}
+
+func TestQueryToolDistinguishesNullFromNULLText(t *testing.T) {
+	cs := connect(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "query", Arguments: map[string]any{"env": "dev", "sql": "select null as a, 'NULL' as null_vs_text"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("query: %v %+v", err, res)
+	}
+	raw, _ := json.Marshal(res.StructuredContent)
+	var got struct {
+		Rows []json.RawMessage `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rows) != 1 || string(got.Rows[0]) != `[null,"NULL"]` {
+		t.Fatalf("rows = %s, want [[null,\"NULL\"]] (structured content %s)", got.Rows, raw)
 	}
 }
