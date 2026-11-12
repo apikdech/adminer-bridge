@@ -51,9 +51,13 @@ for i in $(seq 1 200); do LONG="$LONG, 1 AS c$i"; done
 run long_stmt.html "$LONG"
 run bad_token.html "SELECT 1" 100 "1:2"
 
-# 4. failed login: exactly once, last, separate cookie jar. Adminer answers 302; -L follows
-# it (as GET) so the saved page carries the error.
-curl -sSL -o "$OUT/login_failed.html" -c "$JAR2" -b "$JAR2" "$BASE" \
-  --form-string 'auth[driver]=pgsql' --form-string 'auth[server]=database' \
-  --form-string 'auth[username]=postgres' --form-string 'auth[password]=definitely-wrong-password' \
-  --form-string 'auth[db]=glchat'
+# 4. failed login: opt-in only (CAPTURE_FAILED_LOGIN=1) because Adminer throttles IPs after
+# failed logins. Adminer answers 302; -L follows it as GET and the jar must go with it.
+# NOTE: this step has NOT been run as written. The committed login_failed.html was captured
+# by hand without -b, so it shows "Session expired, please login again." (see NOTES.md).
+if [ "${CAPTURE_FAILED_LOGIN:-}" = 1 ]; then
+  curl -sSL -o "$OUT/login_failed.html" -c "$JAR2" -b "$JAR2" "$BASE" \
+    --form-string 'auth[driver]=pgsql' --form-string 'auth[server]=database' \
+    --form-string 'auth[username]=postgres' --form-string 'auth[password]=definitely-wrong-password' \
+    --form-string 'auth[db]=glchat'
+fi
