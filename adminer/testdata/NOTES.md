@@ -114,7 +114,7 @@ failing statement is followed by:
   the index of the failing statement.
 - No pre/messages for later statements (sql-6 ROLLBACK is not executed or shown).
 - Read-only violation text: `cannot execute CREATE TABLE in a read-only transaction`
-  (SQLSTATE 25006, shown as "(7)" which is Adminer's own error code).
+  ("(7)" is the code Adminer shows; the SQLSTATE, probably 25006, is not visible in the fixture).
 - After an error, the page re-shows the whole batch in
   `<textarea name='query' ...>` inside `form#form`, with `'` escaped as `&#039;`.
 
@@ -128,9 +128,9 @@ Note this is `div.error`, not `p.error`. Detect on the text "Invalid CSRF token"
 
 ## Token and session
 
-- The CSRF token is `<input type='hidden' name='token' value='933214:708207'>` (single
-  quotes). The same token value also appears in small forms after results (export), but
-  `form#form` holds exactly one `input[name=token]`; scope to it.
+- Each form on a page carries its own `input[name=token]` with a different value
+  (sql_page.html has several). Scope to `form#form` and take its
+  `input[name=token]` (single-quoted attributes: `<input type='hidden' name='token' value='...'>`).
 - Script tags carry a per-response `nonce`. It does not matter for parsing.
 - No session cookie value or password appears in any fixture.
 
@@ -139,11 +139,16 @@ Note this is `div.error`, not `p.error`. Detect on the text "Invalid CSRF token"
 Title `Login - Adminer`. Fields: `auth[driver]`, `auth[server]`, `auth[username]`,
 `auth[password]`, `auth[db]`.
 
-## Login failure (login_failed.html: NOT captured)
+## Login failure (login_failed.html)
 
-The fixture is missing. A failed login POST answers 302 and the first capture
-did not follow the redirect (empty body). A second failed attempt was not made
-because Adminer throttles IPs. The script now uses `curl -L` for that step.
-Message text found in the Adminer source in the container (not seen in a captured
-page): `Invalid credentials.` After too many failures Adminer shows
-`Too many unsuccessful logins, try again in N minute(s).`
+Captured by hand with ONE failed login POST. Adminer answers 302 and redirects to
+`/`. The capture used `-c <jar>` without `-b`, so the redirect carried no session
+cookie, and the page shows:
+
+    <div class='error'>Session expired, please login again.
+
+This is NOT the real wrong-password message. A client that keeps its cookie jar
+across the redirect gets `Invalid credentials.` instead (text taken from the
+Adminer source in the container; not seen in a captured page). After too many
+failures Adminer shows `Too many unsuccessful logins, try again in N minute(s).`
+Parse the error from `div.error` on the page after the redirect.
