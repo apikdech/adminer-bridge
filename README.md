@@ -50,7 +50,7 @@ One Adminer login can reach more than one database on the same server. For examp
 
 > **Caution:** Each database in the list must exist, and the login role must be able to connect to it. Adminer counts a database that it cannot open as a failed login, and it ends the session for all databases of the environment. Too many failed logins block your IP address.
 >
-> The bridge protects against this. Before the first call to a database that is not the default database, it checks the database in the default database. If the database does not exist or the role cannot connect, the call fails with an error. The bridge sends nothing to Adminer with that database name. It remembers this result for 60 seconds. If Adminer still cannot open the database, the bridge does not log in again. Calls to that database then fail for 60 seconds and send no requests.
+> The bridge protects against this. Before the first call to a database that is not the default database, it checks the database in the default database. If the database does not exist or the role cannot connect, the call fails with an error. The bridge sends nothing to Adminer with that database name. It remembers this result for 60 seconds. If Adminer still cannot open the database, the bridge does not log in again. Calls to that database then fail for 60 seconds and send no requests. An expired session is different: if Adminer says "Session expired", the bridge logs in again one time, as for the default database.
 
 1. Add the `databases` list to the environment:
 
