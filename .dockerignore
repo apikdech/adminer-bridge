@@ -1,0 +1,10 @@
+.git
+.gitignore
+.superpowers
+.dockerignore
+Dockerfile
+/adminer-bridge
+docs
+*.md
+config.yaml
+*.env
