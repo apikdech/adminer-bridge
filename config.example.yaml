@@ -1,0 +1,21 @@
+# Copy to ~/.config/adminer-bridge/config.yaml (or set ADMINER_BRIDGE_CONFIG).
+# Passwords are never stored here. Each environment names an environment
+# variable in password_env.
+environments:
+  local:
+    url: http://localhost:8080/      # Adminer base URL
+    server: database                 # server name as Adminer knows it
+    username: postgres
+    database: glchat
+    schema: public                   # default schema (optional, default: public)
+    password_env: ADMINER_LOCAL_PASSWORD
+    # statement_timeout: 15s         # default 15s
+    # lock_timeout: 2s               # default 2s
+    # http_timeout: 30s              # default 30s
+
+  # staging:
+  #   url: https://adminer.staging.example.com/
+  #   server: staging-db.internal
+  #   username: readonly_user
+  #   database: app
+  #   password_env: ADMINER_STAGING_PASSWORD
