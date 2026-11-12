@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,7 @@ type fake struct {
 	calls     []call
 	procs     []string
 	dbProcs   map[string][]string // per-database procs; overrides procs when set
+	missing   map[string]bool     // databases the preflight does not find
 	super     string
 	exts      []string
 	langs     []string
@@ -95,6 +97,18 @@ func (f *fake) Exec(ctx context.Context, db, batch string, limit int) ([]adminer
 	return blocks, err
 }
 
+var datnameRe = regexp.MustCompile(`datname = '([^']*)'`)
+
+// isSetup reports whether stmt is an init or preflight query.
+func isSetup(stmt string) bool {
+	for _, m := range []string{"pg_proc", "rolsuper", "pg_extension", "pg_language", "pg_database"} {
+		if strings.Contains(stmt, m) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fake) answer(db, stmt string, limit int) ([]adminer.Block, error) {
 	switch {
 	case strings.Contains(stmt, "pg_proc"):
@@ -105,7 +119,15 @@ func (f *fake) answer(db, stmt string, limit int) ([]adminer.Block, error) {
 		if f.dbProcs != nil {
 			procs = f.dbProcs[db]
 		}
+		// The preflight needs this function in the default database.
+		procs = append([]string{"has_database_privilege"}, procs...)
 		return tableBlocks(stmt, []string{"proname"}, col(procs)), nil
+	case strings.Contains(stmt, "pg_database"):
+		m := datnameRe.FindStringSubmatch(stmt)
+		if m == nil || f.missing[m[1]] {
+			return tableBlocks(stmt, []string{"datname"}, nil), nil
+		}
+		return tableBlocks(stmt, []string{"datname"}, col([]string{m[1]})), nil
 	case strings.Contains(stmt, "rolsuper"):
 		return tableBlocks(stmt, []string{"rolsuper"}, col([]string{f.super})), nil
 	case strings.Contains(stmt, "pg_extension"):
@@ -485,13 +507,17 @@ func TestExplicitDatabaseReachesExecutor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.calls) != 5 {
-		t.Fatalf("calls = %d, want 5 (4 init + 1 user)", len(f.calls))
-	}
+	// 4 init + 1 preflight in the default database, then 4 init + 1 user in db2.
+	var dbs []string
 	for _, c := range f.calls {
-		if c.db != "db2" {
-			t.Errorf("batch sent to %q, want db2", c.db)
-		}
+		dbs = append(dbs, c.db)
+	}
+	want := []string{"db", "db", "db", "db", "db", "db2", "db2", "db2", "db2", "db2"}
+	if !reflect.DeepEqual(dbs, want) {
+		t.Fatalf("batch databases = %v, want %v", dbs, want)
+	}
+	if !strings.Contains(stmtOf(f.calls[4].batch), "pg_database") {
+		t.Errorf("call 4 = %s, want the preflight", stmtOf(f.calls[4].batch))
 	}
 	if res.Database != "db2" {
 		t.Errorf("Result.Database = %q, want db2", res.Database)
@@ -552,15 +578,15 @@ func TestInitRunsPerDatabase(t *testing.T) {
 	if _, err := b.Query(ctx, "dev", "db", "select now()", 0); !errors.As(err, &rej) || rej.Rule != gate.RuleFunction {
 		t.Errorf("now in db: want function_not_allowed, got %v", err)
 	}
-	// Init ran once per database: 4 + 4 init batches, 2 user batches.
+	// Init ran once per database: 4 + 4 init batches, 1 preflight in db, 2 user batches.
 	inits := map[string]int{}
 	for _, c := range f.calls {
-		if strings.Contains(stmtOf(c.batch), "pg_catalog.pg_") {
+		if isSetup(stmtOf(c.batch)) {
 			inits[c.db]++
 		}
 	}
-	if inits["db"] != 4 || inits["db2"] != 4 || len(f.calls) != 10 {
-		t.Fatalf("init batches = %v, total = %d; want 4 per database, 10 total", inits, len(f.calls))
+	if inits["db"] != 5 || inits["db2"] != 4 || len(f.calls) != 11 {
+		t.Fatalf("setup batches = %v, total = %d; want db 5, db2 4, 11 total", inits, len(f.calls))
 	}
 	envs := b.ListEnvironments()
 	if len(envs) != 1 || len(envs[0].Databases) != 2 {
@@ -649,5 +675,161 @@ func TestListEnvironmentsJSONShape(t *testing.T) {
 		`{"name":"db2","connected":false}]}]`
 	if string(raw) != want {
 		t.Fatalf("got  %s\nwant %s", raw, want)
+	}
+}
+
+const missingErr = `database "db2" (environment "dev") does not exist or the login role cannot connect to it`
+
+func TestPreflightRejectsMissingDatabase(t *testing.T) {
+	f := &fake{super: "f", missing: map[string]bool{"db2": true}}
+	b := multiBridge(f)
+	ctx := context.Background()
+	for _, call := range []func() error{
+		func() error { _, err := b.Query(ctx, "dev", "db2", "select 1", 0); return err },
+		func() error { _, err := b.ListTables(ctx, "dev", "db2", ""); return err },
+		func() error { _, err := b.DescribeTable(ctx, "dev", "db2", "users"); return err },
+	} {
+		if err := call(); err == nil || err.Error() != missingErr {
+			t.Errorf("err = %v, want %q", err, missingErr)
+		}
+	}
+	for _, c := range f.calls {
+		if c.db != "db" {
+			t.Errorf("batch sent to %q; nothing may reach the missing database", c.db)
+		}
+	}
+	// One default init (4) and one preflight: the negative result is cached.
+	if len(f.calls) != 5 {
+		t.Errorf("calls = %d, want 5", len(f.calls))
+	}
+	if !strings.Contains(stmtOf(f.calls[4].batch), "'db2'") {
+		t.Errorf("preflight = %s", stmtOf(f.calls[4].batch))
+	}
+	if d := b.ListEnvironments()[0].Databases[1]; d.Connected {
+		t.Errorf("db2 = %+v, want not connected", d)
+	}
+}
+
+func TestPreflightPositiveRunsOnce(t *testing.T) {
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, c := range f.calls {
+		if strings.Contains(stmtOf(c.batch), "pg_database") {
+			n++
+			if c.db != "db" {
+				t.Errorf("preflight sent to %q, want the default database", c.db)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("preflights = %d, want 1", n)
+	}
+}
+
+func TestPreflightNotForDefaultDatabase(t *testing.T) {
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	if _, err := b.Query(context.Background(), "dev", "", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.calls {
+		if strings.Contains(stmtOf(c.batch), "pg_database") {
+			t.Fatal("preflight ran for the default database")
+		}
+	}
+}
+
+func TestPreflightRetriedAfterInitFailure(t *testing.T) {
+	// A passed preflight is kept even if the init of db2 then fails.
+	f := &fake{super: "f"}
+	b := multiBridge(f)
+	ctx := context.Background()
+	if _, err := b.Query(ctx, "dev", "", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.initErr = errors.New("boom")
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err == nil {
+		t.Fatal("want init error")
+	}
+	f.initErr = nil
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range f.calls {
+		if strings.Contains(stmtOf(c.batch), "pg_database") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("preflights = %d, want 1", n)
+	}
+}
+
+func TestPreflightNegativeCacheExpires(t *testing.T) {
+	f := &fake{super: "f", missing: map[string]bool{"db2": true}}
+	b := multiBridge(f)
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	ctx := context.Background()
+	preflights := func() int {
+		n := 0
+		for _, c := range f.calls {
+			if strings.Contains(stmtOf(c.batch), "pg_database") {
+				n++
+			}
+		}
+		return n
+	}
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err == nil || err.Error() != missingErr {
+		t.Fatalf("err = %v", err)
+	}
+	now = now.Add(59 * time.Second)
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err == nil || err.Error() != missingErr {
+		t.Fatalf("cached err = %v", err)
+	}
+	if n := preflights(); n != 1 {
+		t.Fatalf("preflights within 60s = %d, want 1", n)
+	}
+	// The database is created; after 60s the bridge checks again.
+	now = now.Add(2 * time.Second)
+	f.missing = nil
+	if _, err := b.Query(ctx, "dev", "db2", "select 1", 0); err != nil {
+		t.Fatalf("after expiry: %v", err)
+	}
+	if n := preflights(); n != 2 {
+		t.Fatalf("preflights = %d, want 2", n)
+	}
+}
+
+func TestPreflightNeedsDefaultInit(t *testing.T) {
+	// If the default database cannot be initialised, nothing is sent to db2.
+	f := &fake{super: "f", initErr: errors.New("boom")}
+	b := multiBridge(f)
+	_, err := b.Query(context.Background(), "dev", "db2", "select 1", 0)
+	if err == nil || !strings.Contains(err.Error(), `database "db"`) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("err = %v, want the default database init error", err)
+	}
+	for _, c := range f.calls {
+		if c.db != "db" {
+			t.Errorf("batch sent to %q", c.db)
+		}
+	}
+}
+
+func TestPreflightStatementPassesGate(t *testing.T) {
+	q := preflightSQL("o'brien")
+	if _, err := gate.Validate(q, gate.FuncSet{"has_database_privilege": {}}); err != nil {
+		t.Fatalf("preflight %q rejected: %v", q, err)
+	}
+	if !strings.Contains(q, "'o''brien'") {
+		t.Errorf("name not quoted: %s", q)
 	}
 }

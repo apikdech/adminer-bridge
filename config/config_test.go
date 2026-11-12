@@ -159,6 +159,8 @@ func TestLoadRejectsBadDatabases(t *testing.T) {
 		"default missing":  {"    databases: [dev, dev2]\n", "glchat"},
 		"empty list":       {"    databases: []\n", "databases"},
 		"whitespace entry": {"    databases: [glchat, \" \"]\n", "empty"},
+		"leading space":    {"    databases: [glchat, \" dev\"]\n", "whitespace"},
+		"trailing space":   {"    databases: [glchat, \"dev \"]\n", "whitespace"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -44,8 +44,9 @@ type fakeAdminer struct {
 	reqs       []recorded
 	logins     int
 	batches    []recorded
-	events     []string // "login" or "GET ?query" in arrival order
-	failGets   int      // the next failGets GETs answer 502 (no SQL page)
+	events     []string          // "login" or "GET ?query" in arrival order
+	failGets   int               // the next failGets GETs answer 502 (no SQL page)
+	dbPages    map[string]string // fixture for any request whose db= is a key (Adminer cannot open that database)
 }
 
 func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +79,14 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.events = append(f.events, "login")
 	} else {
 		f.events = append(f.events, r.Method+" "+r.URL.RawQuery)
+	}
+
+	if page, ok := f.dbPages[r.URL.Query().Get("db")]; ok && r.URL.Query().Has("sql") {
+		if r.Method == http.MethodPost {
+			f.batches = append(f.batches, rec)
+		}
+		serve(page)
+		return
 	}
 
 	switch {
@@ -437,7 +446,9 @@ func TestExecUsesRequestedDatabaseWithOneLogin(t *testing.T) {
 	}
 }
 
-func TestExecTokenFetchUsesRequestedDatabase(t *testing.T) {
+// Token fetches always use the default database: a token is per session, and
+// a request for a database Adminer cannot open costs a failed-login strike.
+func TestExecTokenFetchUsesDefaultDatabase(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"ok.html"}}
 	c, _ := newTestClient(t, f)
 	if _, err := c.Exec(context.Background(), "postgres", "SELECT 1", 0); err != nil {
@@ -449,8 +460,99 @@ func TestExecTokenFetchUsesRequestedDatabase(t *testing.T) {
 			gets = append(gets, r.query)
 		}
 	}
-	if len(gets) != 1 || gets[0].Get("db") != "postgres" {
-		t.Fatalf("token GETs = %v, want one with db=postgres", gets)
+	if len(gets) != 1 || gets[0].Get("db") != "glchat" {
+		t.Fatalf("token GETs = %v, want one with db=glchat", gets)
+	}
+	if got := f.batches[0].query.Get("db"); got != "postgres" {
+		t.Errorf("batch db = %q, want postgres", got)
+	}
+}
+
+func TestExecNonDefaultDatabaseLoginPageNoRelogin(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": "login_failed.html"}}
+	c, _ := newTestClient(t, f)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	_, err := c.Exec(ctx, "broken", "SELECT 1", 0)
+	if !errors.Is(err, ErrDatabase) || errors.Is(err, ErrLogin) {
+		t.Fatalf("err = %v, want ErrDatabase and not ErrLogin", err)
+	}
+	for _, want := range []string{`"staging"`, `"broken"`, "Session expired"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %s", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), testPassword) {
+		t.Errorf("error leaks password")
+	}
+	if f.logins != 1 {
+		t.Errorf("logins = %d, want 1 (no re-login for a database failure)", f.logins)
+	}
+	if len(f.batches) != 1 {
+		t.Errorf("batch posts = %d, want 1 (no resend)", len(f.batches))
+	}
+
+	// Latched: no request at all inside the cooldown.
+	n := len(f.reqs)
+	now = now.Add(59 * time.Second)
+	_, err = c.Exec(ctx, "broken", "SELECT 1", 0)
+	if !errors.Is(err, ErrDatabase) || !strings.Contains(err.Error(), `"broken"`) || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("latched err = %v", err)
+	}
+	if len(f.reqs) != n {
+		t.Fatalf("requests during cooldown = %d, want 0", len(f.reqs)-n)
+	}
+
+	// The default database is not latched.
+	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {
+		t.Fatalf("default database: %v", err)
+	}
+
+	// After the cooldown the database is tried again.
+	now = now.Add(2 * time.Second)
+	n = len(f.batches)
+	if _, err := c.Exec(ctx, "broken", "SELECT 1", 0); !errors.Is(err, ErrDatabase) {
+		t.Fatalf("after cooldown err = %v", err)
+	}
+	if len(f.batches) != n+1 {
+		t.Errorf("batch posts after cooldown = %d, want 1", len(f.batches)-n)
+	}
+	if f.logins != 1 {
+		t.Errorf("logins = %d, want 1", f.logins)
+	}
+}
+
+func TestExecNonDefaultDatabaseFailureClearsToken(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": "login_failed.html"}}
+	c, _ := newTestClient(t, f)
+	ctx := context.Background()
+	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, "broken", "SELECT 1", 0); !errors.Is(err, ErrDatabase) {
+		t.Fatalf("err = %v", err)
+	}
+	// Adminer restarts the session on a database failure, so the next Exec
+	// must fetch a new token first.
+	gets := 0
+	for _, e := range f.events {
+		if strings.HasPrefix(e, "GET") && strings.Contains(e, "sql=") {
+			gets++
+		}
+	}
+	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	after := 0
+	for _, e := range f.events {
+		if strings.HasPrefix(e, "GET") && strings.Contains(e, "sql=") {
+			after++
+		}
+	}
+	if after != gets+1 {
+		t.Errorf("token GETs after the failure = %d, want 1", after-gets)
 	}
 }
 

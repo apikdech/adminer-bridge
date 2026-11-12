@@ -34,7 +34,7 @@ const testConfig = `environments:
     server: database
     username: postgres
     database: glchat
-    databases: [glchat, postgres]
+    databases: [glchat, postgres, zz_no_such_db]
     schema: public
     password_env: ADMINER_LOCAL_PASSWORD
   local_stmt1s:
@@ -269,7 +269,7 @@ func TestITDatabases(t *testing.T) {
 	// The bridge rejects stackframe before it sends anything, so the error
 	// is the bare allowlist error, not a wrapped Adminer error.
 	_, err := b.Query(ctx(t), envLocal, "stackframe", "select current_database()", 0)
-	want := `database "stackframe" is not allowed for environment "local"; allowed: glchat, postgres`
+	want := `database "stackframe" is not allowed for environment "local"; allowed: glchat, postgres, zz_no_such_db`
 	if err == nil || err.Error() != want {
 		t.Fatalf("stackframe: err = %v, want %q", err, want)
 	}
@@ -277,8 +277,38 @@ func TestITDatabases(t *testing.T) {
 		if e.Name != envLocal {
 			continue
 		}
-		if len(e.Databases) != 2 || !e.Databases[0].Connected || !e.Databases[1].Connected {
+		if len(e.Databases) != 3 || !e.Databases[0].Connected || !e.Databases[1].Connected {
 			t.Errorf("databases = %+v, want glchat and postgres connected", e.Databases)
+		}
+	}
+}
+
+// TestITDatabaseMissing checks that a listed database that does not exist
+// is caught by the preflight in the default database. Adminer never gets
+// the name, so it counts no failed login and keeps the session: the
+// default database still works afterwards with the same login.
+func TestITDatabaseMissing(t *testing.T) {
+	b := setup(t)
+	if _, err := b.Query(ctx(t), envLocal, "", "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	want := `database "zz_no_such_db" (environment "local") does not exist or the login role cannot connect to it`
+	for i := 0; i < 2; i++ { // the second call uses the cached result
+		_, err := b.Query(ctx(t), envLocal, "zz_no_such_db", "select 1", 0)
+		if err == nil || err.Error() != want {
+			t.Fatalf("call %d: err = %v, want %q", i, err, want)
+		}
+	}
+	res, err := b.Query(ctx(t), envLocal, "", "select current_database()", 0)
+	if err != nil {
+		t.Fatalf("default database after the missing one: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] == nil || *res.Rows[0][0] != "glchat" {
+		t.Errorf("rows = %v, want glchat", res.Rows)
+	}
+	for _, e := range b.ListEnvironments() {
+		if e.Name == envLocal && e.Databases[2].Connected {
+			t.Errorf("zz_no_such_db shows as connected: %+v", e.Databases[2])
 		}
 	}
 }

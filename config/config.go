@@ -107,6 +107,9 @@ func (e *Env) checkDatabases() error {
 		if strings.TrimSpace(d) == "" {
 			return fmt.Errorf("environment %q: databases entry %d is empty", e.Name, i+1)
 		}
+		if strings.TrimSpace(d) != d {
+			return fmt.Errorf("environment %q: databases entry %q has leading or trailing whitespace", e.Name, d)
+		}
 		if seen[d] {
 			return fmt.Errorf("environment %q: databases lists %q more than once", e.Name, d)
 		}

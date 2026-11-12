@@ -31,7 +31,13 @@ func (fakeExec) Exec(_ context.Context, db, batch string, _ int) ([]adminer.Bloc
 	main := adminer.Block{SQL: stmt, Kind: adminer.KindTable, Columns: []string{"x"}, Rows: val("1")}
 	switch {
 	case strings.Contains(stmt, "pg_proc"):
-		main.Rows = append(val("count"), val("current_database")...)
+		main.Rows = append(append(val("count"), val("current_database")...), val("has_database_privilege")...)
+	case strings.Contains(stmt, "pg_database"):
+		// Preflight: every database exists.
+		_, name, _ := strings.Cut(stmt, "datname = '")
+		name, _, _ = strings.Cut(name, "'")
+		main.Columns = []string{"datname"}
+		main.Rows = val(name)
 	case strings.Contains(stmt, "rolsuper"):
 		main.Rows = val("f")
 	case strings.Contains(stmt, "pg_extension"), strings.Contains(stmt, "pg_language"):
