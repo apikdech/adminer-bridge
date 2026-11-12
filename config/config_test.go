@@ -123,3 +123,79 @@ func TestLoadAcceptsValidTimeouts(t *testing.T) {
 		t.Fatalf("got %+v", e)
 	}
 }
+
+func TestAllowedDatabasesDefaultsToDatabase(t *testing.T) {
+	c, err := Load(writeCfg(t, full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Environments["local"]
+	if got := e.AllowedDatabases(); len(got) != 1 || got[0] != "glchat" {
+		t.Fatalf("AllowedDatabases = %v, want [glchat]", got)
+	}
+}
+
+func TestAllowedDatabasesKeepsConfigOrder(t *testing.T) {
+	c, err := Load(writeCfg(t, full+"    databases: [dev, glchat, dev2]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Environments["local"].AllowedDatabases()
+	want := []string{"dev", "glchat", "dev2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("AllowedDatabases = %v, want %v", got, want)
+	}
+	// The caller must not be able to change the allowlist through the result.
+	got[0] = "evil"
+	if c.Environments["local"].AllowedDatabases()[0] != "dev" {
+		t.Fatal("AllowedDatabases returned the internal slice")
+	}
+}
+
+func TestLoadRejectsBadDatabases(t *testing.T) {
+	cases := map[string]struct{ extra, want string }{
+		"empty entry":      {"    databases: [glchat, \"\"]\n", "empty"},
+		"duplicate entry":  {"    databases: [glchat, dev, dev]\n", "dev"},
+		"default missing":  {"    databases: [dev, dev2]\n", "glchat"},
+		"empty list":       {"    databases: []\n", "databases"},
+		"whitespace entry": {"    databases: [glchat, \" \"]\n", "empty"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeCfg(t, full+tc.extra))
+			if err == nil || !strings.Contains(err.Error(), `"local"`) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got err %v, want an error naming the environment and %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveDatabase(t *testing.T) {
+	c, err := Load(writeCfg(t, full+"    databases: [glchat, dev, dev2]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Environments["local"]
+	for in, want := range map[string]string{"": "glchat", "glchat": "glchat", "dev": "dev", "dev2": "dev2"} {
+		if got, err := e.ResolveDatabase(in); err != nil || got != want {
+			t.Errorf("ResolveDatabase(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"dev3", "DEV", " dev", "postgres"} {
+		_, err := e.ResolveDatabase(in)
+		want := `database "` + in + `" is not allowed for environment "local"; allowed: glchat, dev, dev2`
+		if err == nil || err.Error() != want {
+			t.Errorf("ResolveDatabase(%q) err = %v, want %q", in, err, want)
+		}
+	}
+}
+
+func TestResolveDatabaseWithoutList(t *testing.T) {
+	e := &Env{Name: "x", Database: "app"}
+	if got, err := e.ResolveDatabase(""); err != nil || got != "app" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := e.ResolveDatabase("other"); err == nil || !strings.Contains(err.Error(), "allowed: app") {
+		t.Fatalf("got %v", err)
+	}
+}
