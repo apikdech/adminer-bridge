@@ -16,10 +16,11 @@ import (
 )
 
 // fakeExec answers the bridge's init batches and echoes every other
-// statement back as a one-row table.
+// statement back as a one-row table. A statement containing
+// current_database answers with the database it was sent to.
 type fakeExec struct{}
 
-func (fakeExec) Exec(_ context.Context, _, batch string, _ int) ([]adminer.Block, error) {
+func (fakeExec) Exec(_ context.Context, db, batch string, _ int) ([]adminer.Block, error) {
 	parts := strings.Split(batch, ";\n")
 	stmt := parts[4]
 	blocks := make([]adminer.Block, 0, 6)
@@ -30,11 +31,14 @@ func (fakeExec) Exec(_ context.Context, _, batch string, _ int) ([]adminer.Block
 	main := adminer.Block{SQL: stmt, Kind: adminer.KindTable, Columns: []string{"x"}, Rows: val("1")}
 	switch {
 	case strings.Contains(stmt, "pg_proc"):
-		main.Rows = val("count")
+		main.Rows = append(val("count"), val("current_database")...)
 	case strings.Contains(stmt, "rolsuper"):
 		main.Rows = val("f")
 	case strings.Contains(stmt, "pg_extension"), strings.Contains(stmt, "pg_language"):
 		main.Rows = nil
+	case strings.Contains(stmt, "current_database"):
+		main.Columns = []string{"current_database"}
+		main.Rows = val(db)
 	case strings.Contains(stmt, "null_vs_text"):
 		// An SQL NULL cell and a text cell that reads "NULL".
 		s := "NULL"
@@ -48,7 +52,7 @@ func (fakeExec) Exec(_ context.Context, _, batch string, _ int) ([]adminer.Block
 func connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()
 	cfg := &config.Config{Environments: map[string]*config.Env{"dev": {
-		Name: "dev", URL: "http://x/", Database: "db", Schema: "public",
+		Name: "dev", URL: "http://x/", Database: "db", Databases: []string{"db", "db2"}, Schema: "public",
 		StatementTimeout: 15 * time.Second, LockTimeout: 2 * time.Second,
 	}}}
 	b := bridge.NewWithExecutors(cfg, map[string]bridge.Executor{"dev": fakeExec{}})
@@ -161,5 +165,89 @@ func TestQueryToolDistinguishesNullFromNULLText(t *testing.T) {
 	}
 	if len(got.Rows) != 1 || string(got.Rows[0]) != `[null,"NULL"]` {
 		t.Fatalf("rows = %s, want [[null,\"NULL\"]] (structured content %s)", got.Rows, raw)
+	}
+}
+
+func callText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		return ""
+	}
+	return res.Content[0].(*mcp.TextContent).Text
+}
+
+func TestQueryToolDatabase(t *testing.T) {
+	cs := connect(t)
+	ctx := context.Background()
+	for _, tc := range []struct{ arg, want string }{{"", "db"}, {"db2", "db2"}} {
+		args := map[string]any{"env": "dev", "sql": "select current_database()"}
+		if tc.arg != "" {
+			args["database"] = tc.arg
+		}
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "query", Arguments: args})
+		if err != nil || res.IsError {
+			t.Fatalf("database %q: %v %s", tc.arg, err, callText(t, res))
+		}
+		raw, _ := json.Marshal(res.StructuredContent)
+		var got struct {
+			Rows     [][]string `json:"rows"`
+			Database string     `json:"database"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Database != tc.want || len(got.Rows) != 1 || got.Rows[0][0] != tc.want {
+			t.Errorf("database %q: got %s, want rows and database %q", tc.arg, raw, tc.want)
+		}
+	}
+}
+
+func TestToolsRejectDisallowedDatabase(t *testing.T) {
+	cs := connect(t)
+	ctx := context.Background()
+	want := `database "db3" is not allowed for environment "dev"; allowed: db, db2`
+	for name, args := range map[string]map[string]any{
+		"query":          {"env": "dev", "database": "db3", "sql": "select 1"},
+		"list_tables":    {"env": "dev", "database": "db3"},
+		"describe_table": {"env": "dev", "database": "db3", "table": "users"},
+	} {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: protocol error %v, want tool error", name, err)
+		}
+		if !res.IsError || !strings.Contains(callText(t, res), want) {
+			t.Errorf("%s: IsError=%v text=%q, want %q", name, res.IsError, callText(t, res), want)
+		}
+	}
+}
+
+func TestToolsDescribeDatabaseInput(t *testing.T) {
+	cs := connect(t)
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res.Tools {
+		if tl.Name == "list_environments" {
+			continue
+		}
+		raw, _ := json.Marshal(tl.InputSchema)
+		var schema struct {
+			Properties map[string]struct {
+				Type        string `json:"type"`
+				Description string `json:"description"`
+			} `json:"properties"`
+			Required []string `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		p, ok := schema.Properties["database"]
+		if !ok || p.Type != "string" || !strings.Contains(p.Description, "allowed databases") {
+			t.Errorf("%s: database property = %+v (schema %s)", tl.Name, p, raw)
+		}
+		if slices.Contains(schema.Required, "database") {
+			t.Errorf("%s: database must be optional", tl.Name)
+		}
 	}
 }

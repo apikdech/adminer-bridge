@@ -24,7 +24,7 @@ var version = "dev"
 
 const usage = `usage:
   adminer-bridge serve [--config path]
-  adminer-bridge query [--config path] --env NAME [--max-rows N] [--json] "SQL"
+  adminer-bridge query [--config path] --env NAME [--db NAME] [--max-rows N] [--json] "SQL"
 `
 
 func main() {
@@ -86,6 +86,7 @@ func query(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "config file")
 	env := fs.String("env", "", "environment name (required)")
+	db := fs.String("db", "", "database (default: the environment's default database; must be an allowed database)")
 	maxRows := fs.Int("max-rows", 0, "maximum rows (default 100, hard max 1000)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	// Allow flags on either side of the SQL argument.
@@ -110,7 +111,7 @@ func query(args []string, stdout, stderr io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	res, err := b.Query(ctx, *env, "", pos[0], *maxRows)
+	res, err := b.Query(ctx, *env, *db, pos[0], *maxRows)
 	if err != nil {
 		return err
 	}
