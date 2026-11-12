@@ -191,7 +191,7 @@ func TestITLockTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("query succeeded while the table was locked")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "lock") {
+	if !strings.Contains(strings.ToLower(err.Error()), "lock timeout") {
 		t.Errorf("error does not mention lock timeout: %v", err)
 	}
 	if elapsed > 4*time.Second {
