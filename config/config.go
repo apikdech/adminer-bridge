@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -17,7 +18,8 @@ type Env struct {
 	URL              string        `yaml:"url"`
 	Server           string        `yaml:"server"`
 	Username         string        `yaml:"username"`
-	Database         string        `yaml:"database"`
+	Database         string        `yaml:"database"`  // default database
+	Databases        []string      `yaml:"databases"` // optional allowlist; must contain Database
 	Schema           string        `yaml:"schema"`
 	PasswordEnv      string        `yaml:"password_env"`
 	StatementTimeout time.Duration `yaml:"statement_timeout"`
@@ -59,6 +61,9 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("environment %q: missing required field %q", name, r.field)
 			}
 		}
+		if err := e.checkDatabases(); err != nil {
+			return nil, err
+		}
 		if e.Schema == "" {
 			e.Schema = "public"
 		}
@@ -87,6 +92,57 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// checkDatabases validates the optional databases allowlist.
+func (e *Env) checkDatabases() error {
+	if e.Databases == nil {
+		return nil
+	}
+	if len(e.Databases) == 0 {
+		return fmt.Errorf("environment %q: databases is empty; remove it or list the allowed databases", e.Name)
+	}
+	seen := map[string]bool{}
+	for i, d := range e.Databases {
+		if strings.TrimSpace(d) == "" {
+			return fmt.Errorf("environment %q: databases entry %d is empty", e.Name, i+1)
+		}
+		if seen[d] {
+			return fmt.Errorf("environment %q: databases lists %q more than once", e.Name, d)
+		}
+		seen[d] = true
+	}
+	if !seen[e.Database] {
+		return fmt.Errorf("environment %q: databases must include the default database %q", e.Name, e.Database)
+	}
+	return nil
+}
+
+// AllowedDatabases returns the databases callers may use in this
+// environment, in config order. Without a databases list it is [Database].
+// The result is a copy.
+func (e *Env) AllowedDatabases() []string {
+	if len(e.Databases) == 0 {
+		return []string{e.Database}
+	}
+	return append([]string(nil), e.Databases...)
+}
+
+// ResolveDatabase maps a caller's database choice to the database to use:
+// "" is the default database, an allowed name (exact, case-sensitive match)
+// is itself, anything else is an error that lists the allowed databases.
+func (e *Env) ResolveDatabase(name string) (string, error) {
+	if name == "" {
+		return e.Database, nil
+	}
+	allowed := e.AllowedDatabases()
+	for _, d := range allowed {
+		if d == name {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("database %q is not allowed for environment %q; allowed: %s",
+		name, e.Name, strings.Join(allowed, ", "))
 }
 
 // DefaultPath returns ADMINER_BRIDGE_CONFIG or ~/.config/adminer-bridge/config.yaml.
