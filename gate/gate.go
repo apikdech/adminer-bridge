@@ -158,6 +158,9 @@ func checkKey(key string, value any, funcs FuncSet) *RejectError {
 		return reject(RuleSelectInto, "SELECT ... INTO creates a table")
 	case key == "lockingClause":
 		return reject(RuleLocking, "FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE take row locks")
+	case key == "ParamRef":
+		return reject(RuleUnsafeChars,
+			"$n parameters are not supported (Adminer's statement splitter may treat $...$ as a dollar-quote); write the value inline")
 	case key == "FuncCall":
 		return checkFuncCall(value, funcs)
 	case key != "SelectStmt" && strings.HasSuffix(key, "Stmt"):
@@ -166,11 +169,28 @@ func checkKey(key string, value any, funcs FuncSet) *RejectError {
 	return nil
 }
 
-// checkFuncCall decides whether a FuncCall node is allowed. No function
-// allowlist exists yet, so every call is rejected.
-func checkFuncCall(_ any, funcs FuncSet) *RejectError {
-	if len(funcs) == 0 {
-		return reject(RuleFunction, "function calls are rejected until the built-in function list is loaded")
+// checkFuncCall decides whether a FuncCall node is allowed: the name must
+// be unqualified or in pg_catalog, must not be blocklisted, and must be in
+// funcs (matched exactly, case-sensitively).
+func checkFuncCall(node any, funcs FuncSet) *RejectError {
+	m, _ := node.(map[string]any)
+	parts, _ := m["funcname"].([]any)
+	names := make([]string, 0, len(parts))
+	for _, p := range parts {
+		pm, _ := p.(map[string]any)
+		sm, _ := pm["String"].(map[string]any)
+		s, _ := sm["sval"].(string)
+		names = append(names, s)
 	}
-	return reject(RuleFunction, "function calls are not allowed")
+	if len(names) == 0 || len(names) > 2 || (len(names) == 2 && names[0] != "pg_catalog") {
+		return reject(RuleFunction, "function %s is not allowed: only unqualified or pg_catalog functions may be called", strings.Join(names, "."))
+	}
+	name := names[len(names)-1]
+	if Blocked(name) {
+		return reject(RuleFunction, "function %s is blocked: it has side effects or reaches outside the database", name)
+	}
+	if _, ok := funcs[name]; !ok {
+		return reject(RuleFunction, "function %s is not an allowed built-in function", name)
+	}
+	return nil
 }
