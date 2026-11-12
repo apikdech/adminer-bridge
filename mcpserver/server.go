@@ -57,7 +57,7 @@ func New(b *bridge.Bridge, version string) *mcp.Server {
 		Name:        "query",
 		Description: "Run a read-only SQL statement against a Postgres environment. " + readOnlyRules,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, *bridge.Result, error) {
-		res, err := b.Query(ctx, in.Env, in.SQL, in.MaxRows)
+		res, err := b.Query(ctx, in.Env, "", in.SQL, in.MaxRows)
 		return nil, res, err
 	})
 
@@ -65,7 +65,7 @@ func New(b *bridge.Bridge, version string) *mcp.Server {
 		Name:        "list_tables",
 		Description: "List tables and views in a schema. " + readOnlyRules,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listTablesInput) (*mcp.CallToolResult, *bridge.Result, error) {
-		res, err := b.ListTables(ctx, in.Env, in.Schema)
+		res, err := b.ListTables(ctx, in.Env, "", in.Schema)
 		return nil, res, err
 	})
 
@@ -73,7 +73,7 @@ func New(b *bridge.Bridge, version string) *mcp.Server {
 		Name:        "describe_table",
 		Description: "Show columns, indexes and foreign keys of a table. " + readOnlyRules,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in describeTableInput) (*mcp.CallToolResult, *bridge.TableDescription, error) {
-		res, err := b.DescribeTable(ctx, in.Env, in.Table)
+		res, err := b.DescribeTable(ctx, in.Env, "", in.Table)
 		return nil, res, err
 	})
 

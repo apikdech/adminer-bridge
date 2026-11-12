@@ -101,7 +101,7 @@ func ctx(t *testing.T) context.Context {
 
 func TestITSelect(t *testing.T) {
 	b := setup(t)
-	res, err := b.Query(ctx(t), envLocal, "select 1 as a, null as b", 0)
+	res, err := b.Query(ctx(t), envLocal, "", "select 1 as a, null as b", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,10 +118,10 @@ func TestITSelect(t *testing.T) {
 
 func TestITFunctionsLoaded(t *testing.T) {
 	b := setup(t)
-	if _, err := b.Query(ctx(t), envLocal, "select count(*) from pg_catalog.pg_class", 0); err != nil {
+	if _, err := b.Query(ctx(t), envLocal, "", "select count(*) from pg_catalog.pg_class", 0); err != nil {
 		t.Errorf("count(*) from pg_class: %v", err)
 	}
-	if _, err := b.Query(ctx(t), envLocal, "select pg_sleep(0)", 0); err == nil {
+	if _, err := b.Query(ctx(t), envLocal, "", "select pg_sleep(0)", 0); err == nil {
 		t.Error("pg_sleep(0) was accepted")
 	}
 }
@@ -147,7 +147,7 @@ func TestITLayer3(t *testing.T) {
 		t.Fatalf("block %d = kind %v, message %q; want error containing \"read-only transaction\"",
 			gate.WrappedStmtIndex, blk.Kind, blk.Message)
 	}
-	res, err := b.Query(ctx(t), envLocal, "select to_regclass('zz_it_probe')", 0)
+	res, err := b.Query(ctx(t), envLocal, "", "select to_regclass('zz_it_probe')", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestITLockTimeout(t *testing.T) {
 	time.Sleep(1 * time.Second) // let the holder take the lock
 
 	start := time.Now()
-	_, err := b.Query(ctx(t), envLocal, "select * from "+table, 0)
+	_, err := b.Query(ctx(t), envLocal, "", "select * from "+table, 0)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("query succeeded while the table was locked")
@@ -201,7 +201,7 @@ func TestITLockTimeout(t *testing.T) {
 
 func TestITStatementTimeout(t *testing.T) {
 	b := setup(t)
-	_, err := b.Query(ctx(t), envStmt, "select count(*) from generate_series(1, 300000000)", 0)
+	_, err := b.Query(ctx(t), envStmt, "", "select count(*) from generate_series(1, 300000000)", 0)
 	if err == nil {
 		t.Fatal("long query succeeded")
 	}
@@ -213,26 +213,26 @@ func TestITStatementTimeout(t *testing.T) {
 func TestITRoleWarnings(t *testing.T) {
 	b := setup(t)
 	// The role check runs on first connect, so make sure we are connected.
-	if _, err := b.Query(ctx(t), envLocal, "select 1", 0); err != nil {
+	if _, err := b.Query(ctx(t), envLocal, "", "select 1", 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range b.ListEnvironments() {
 		if e.Name != envLocal {
 			continue
 		}
-		for _, w := range e.Warnings {
+		for _, w := range e.Databases[0].Warnings {
 			if strings.Contains(w, "superuser") {
 				return
 			}
 		}
-		t.Fatalf("no superuser warning for %s: %v", envLocal, e.Warnings)
+		t.Fatalf("no superuser warning for %s: %v", envLocal, e.Databases[0].Warnings)
 	}
 	t.Fatalf("environment %s not listed", envLocal)
 }
 
 func TestITDescribeTable(t *testing.T) {
 	b := setup(t)
-	tables, err := b.ListTables(ctx(t), envLocal, "")
+	tables, err := b.ListTables(ctx(t), envLocal, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestITDescribeTable(t *testing.T) {
 		t.Skip("no tables in schema public")
 	}
 	name := *tables.Rows[0][0]
-	desc, err := b.DescribeTable(ctx(t), envLocal, name)
+	desc, err := b.DescribeTable(ctx(t), envLocal, "", name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -110,7 +110,7 @@ func query(args []string, stdout, stderr io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	res, err := b.Query(ctx, *env, pos[0], *maxRows)
+	res, err := b.Query(ctx, *env, "", pos[0], *maxRows)
 	if err != nil {
 		return err
 	}
