@@ -218,6 +218,141 @@ codex mcp add adminer-bridge --env ADMINER_LOCAL_PASSWORD=... -- /home/ricky-set
 
 With `{env:NAME}`, the passwords do not go into `opencode.json`. If a variable is not set, OpenCode gives an empty value, and the server does not start.
 
+## Run as an HTTP server (Docker)
+
+Use HTTP mode when the MCP client runs in a container that must not hold secrets, for example a debug agent. The bridge runs in its own container and holds the passwords. The agent calls the bridge over the network and holds only the bearer token.
+
+In HTTP mode, the bridge serves MCP over streamable HTTP at `/mcp`. All clients share one Adminer login and one query lock for each environment. `GET /healthz` returns `ok` and needs no token. All other paths return 404.
+
+```text
+adminer-bridge serve --http ADDR [--config path] [--token-env NAME]
+adminer-bridge health [--url URL]
+```
+
+### Create the token
+
+The bearer token is the only access control of HTTP mode.
+
+> **Warning:** A person with the token can run read-only queries on every configured environment and database. Keep the token secret. Do not put it in an image, a config file, or a log.
+
+1. Create a token:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+2. Give the token to the bridge in the `ADMINER_BRIDGE_TOKEN` variable. To use a different variable, use `--token-env NAME`.
+3. Give the same token to the MCP client as the header `Authorization: Bearer <token>`.
+
+If the token variable is not set, or if the token has fewer than 32 characters, `serve --http` stops with an error. The error gives the name of the variable, not the value. A request with a missing or wrong token gets a 401 response, and the bridge writes one log line without the token.
+
+### Build and run the image
+
+The image uses `gcr.io/distroless/base-debian12:nonroot`. It has no shell and no curl. It runs as user 65532. By default it runs `serve --http :8090` and reads the config from `/etc/adminer-bridge/config.yaml`. The Docker health check runs `adminer-bridge health`.
+
+1. Build the image:
+
+   ```bash
+   docker build -t adminer-bridge:latest .
+   ```
+
+2. Put the token and the password variables in an env file, for example `adminer-bridge.env`. Keep this file out of git.
+
+   ```bash
+   ADMINER_BRIDGE_TOKEN=<token>
+   ADMINER_STAGING_PASSWORD=<password>
+   ```
+
+3. Start the container:
+
+   ```bash
+   docker run -d --name adminer-bridge --read-only --cap-drop ALL \
+     --env-file adminer-bridge.env \
+     -v "$PWD/config.yaml:/etc/adminer-bridge/config.yaml:ro" \
+     adminer-bridge:latest
+   ```
+
+4. Make sure that the log shows the listen address:
+
+   ```bash
+   docker logs adminer-bridge
+   ```
+
+   The log shows `listening on [::]:8090`.
+
+> **Note:** If you change the listen port, also change the health check: `health --url http://127.0.0.1:PORT/healthz`.
+
+The server has no write timeout. A tool call can take as long as the longest `http_timeout` of an environment, and the event stream of a session stays open. A write timeout would stop both. Request bodies are limited to 1 MiB. A session closes after one hour without requests. On `SIGINT` or `SIGTERM`, the server stops gracefully.
+
+### Connect an MCP client over HTTP
+
+The MCP URL is `http://HOST:8090/mcp`. A generic client config has this shape:
+
+```json
+{
+  "mcpServers": {
+    "adminer-bridge": {
+      "type": "http",
+      "url": "http://172.28.0.20:8090/mcp",
+      "headers": { "Authorization": "Bearer ${ADMINER_BRIDGE_TOKEN}" }
+    }
+  }
+}
+```
+
+The field names and the variable syntax are different in each client. Check your client's docs.
+
+For Claude Code, run this command:
+
+```bash
+claude mcp add --transport http adminer-bridge http://HOST:8090/mcp --header "Authorization: Bearer $TOKEN"
+```
+
+### Run next to the dayship VPN sidecar
+
+The staging Adminer is reachable only through the VPN. In `glchat-tools-v2/deploy/docker-compose.yml`, the `vpn` service runs OpenVPN. The `relbot` service uses `network_mode: "service:vpn"` and listens on port 8080 in that network namespace. Run the bridge in the same namespace.
+
+1. Add this service to `deploy/docker-compose.yml`:
+
+   ```yaml
+   adminer-bridge:
+     image: adminer-bridge:latest   # or build: from this repo
+     restart: unless-stopped
+     network_mode: "service:vpn"    # staging Adminer is reachable only through the VPN
+     depends_on: { vpn: { condition: service_healthy } }
+     command: ["serve", "--http", ":8090"]
+     env_file: ../secrets/adminer-bridge.env   # ADMINER_BRIDGE_TOKEN, ADMINER_STAGING_PASSWORD
+     volumes:
+       - ../adminer-bridge.yaml:/etc/adminer-bridge/config.yaml:ro
+     read_only: true
+     cap_drop: [ALL]
+   ```
+
+2. Give the `vpn` service a static IP on `relbot_net`:
+
+   ```yaml
+   vpn:
+     networks:
+       relbot_net:
+         ipv4_address: 172.28.0.20
+   ```
+
+3. Configure the agent container to use `http://172.28.0.20:8090/mcp`.
+
+Some notes about this setup:
+
+- The bridge uses port 8090 because `relbot` already uses port 8080 in the same namespace.
+- The services address each other by static IP on `relbot_net` (`172.28.0.0/24`). VPN DNS can replace `resolv.conf`, so Docker DNS names can stop working.
+- The agent container needs a route to `172.28.0.20`. It does not need internet access.
+- Do not publish port 8090 on the host.
+- The Adminer URL in the bridge config can need an IP address. If the host name resolves only through VPN DNS, set `VPN_USE_PUSHED_DNS`. This is the same caveat as for dayship.
+
+### Security notes
+
+- The bearer token is the only access control. A person with the token can run read-only queries on every configured environment and database.
+- Keep port 8090 off public networks. The bridge has no TLS.
+- The bridge compares tokens in constant time. It does not log tokens, passwords, cookies, or query results.
+
 ## Use the CLI
 
 ```bash
