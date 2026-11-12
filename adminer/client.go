@@ -62,11 +62,14 @@ func NewClient(env *config.Env) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) sqlURL() string {
+// sqlURL is the SQL page of database. One Adminer session covers every
+// database on the server: Adminer keys the stored password by (driver,
+// server, username), not by database, so only db= changes.
+func (c *Client) sqlURL(database string) string {
 	q := url.Values{}
 	q.Set("pgsql", c.env.Server)
 	q.Set("username", c.env.Username)
-	q.Set("db", c.env.Database)
+	q.Set("db", database)
 	q.Set("ns", c.env.Schema)
 	q.Set("sql", "")
 	sep := "?"
@@ -108,8 +111,8 @@ func (c *Client) do(req *http.Request) (*page, error) {
 	return &page{kind, blocks, token, pageErr, resp.StatusCode}, nil
 }
 
-func (c *Client) get(ctx context.Context) (*page, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.sqlURL(), nil)
+func (c *Client) get(ctx context.Context, database string) (*page, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.sqlURL(database), nil)
 	if err != nil {
 		return nil, fmt.Errorf("environment %q: %w", c.env.Name, err)
 	}
@@ -117,6 +120,7 @@ func (c *Client) get(ctx context.Context) (*page, error) {
 }
 
 // login posts credentials once. A login page in the answer is ErrLogin.
+// It always logs in to the environment's default database.
 func (c *Client) login(ctx context.Context) error {
 	if c.loginErr != nil && c.now().Sub(c.loginAt) < loginCooldown {
 		return fmt.Errorf("environment %q: %w (login failed recently; retry after the %s cooldown, not sending credentials again): %v",
@@ -154,11 +158,12 @@ func (c *Client) doLogin(ctx context.Context) error {
 	return nil
 }
 
-// fetchToken GETs the SQL page and caches its CSRF token. It reports whether
-// the page was the login page (no session).
-func (c *Client) fetchToken(ctx context.Context) (loginPage bool, err error) {
+// fetchToken GETs the SQL page of database and caches its CSRF token. The
+// token is per session, so it is valid for every database. It reports
+// whether the page was the login page (no session).
+func (c *Client) fetchToken(ctx context.Context, database string) (loginPage bool, err error) {
 	c.token = ""
-	p, err := c.get(ctx)
+	p, err := c.get(ctx, database)
 	if err != nil {
 		return false, err
 	}
@@ -176,14 +181,14 @@ func (c *Client) fetchToken(ctx context.Context) (loginPage bool, err error) {
 // attempted in this Exec call yet, it logs in once and fetches again. A login
 // page after a login is ErrLogin: the login did not take. *loginTried records
 // the login attempt for the calling Exec.
-func (c *Client) refreshToken(ctx context.Context, doLogin bool, loginTried *bool) error {
+func (c *Client) refreshToken(ctx context.Context, database string, doLogin bool, loginTried *bool) error {
 	if doLogin {
 		*loginTried = true
 		if err := c.login(ctx); err != nil {
 			return err
 		}
 	}
-	isLogin, err := c.fetchToken(ctx)
+	isLogin, err := c.fetchToken(ctx, database)
 	if err != nil {
 		return err
 	}
@@ -194,7 +199,7 @@ func (c *Client) refreshToken(ctx context.Context, doLogin bool, loginTried *boo
 		if err := c.login(ctx); err != nil {
 			return err
 		}
-		if isLogin, err = c.fetchToken(ctx); err != nil {
+		if isLogin, err = c.fetchToken(ctx, database); err != nil {
 			return err
 		}
 	}
@@ -211,7 +216,7 @@ func suffix(msg string) string {
 	return ": " + msg
 }
 
-func (c *Client) post(ctx context.Context, batch string, limit int) (*page, error) {
+func (c *Client) post(ctx context.Context, database, batch string, limit int) (*page, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	limitStr := ""
@@ -228,7 +233,7 @@ func (c *Client) post(ctx context.Context, batch string, limit int) (*page, erro
 	if err := mw.Close(); err != nil {
 		return nil, fmt.Errorf("environment %q: %w", c.env.Name, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.sqlURL(), &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.sqlURL(database), &buf)
 	if err != nil {
 		return nil, fmt.Errorf("environment %q: %w", c.env.Name, err)
 	}
@@ -236,10 +241,15 @@ func (c *Client) post(ctx context.Context, batch string, limit int) (*page, erro
 	return c.do(req)
 }
 
-// Exec runs batch (limit 0 = unlimited) and returns one Block per statement.
-// It logs in when needed, and retries once, only for an expired session or an
-// invalid CSRF token.
-func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, error) {
+// Exec runs batch (limit 0 = unlimited) in database and returns one Block
+// per statement. It logs in when needed, and retries once, only for an
+// expired session or an invalid CSRF token. The client does not check
+// database against the environment's allowlist; the bridge does that.
+// database must not be empty.
+func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([]Block, error) {
+	if database == "" {
+		return nil, fmt.Errorf("environment %q: no database given", c.env.Name)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -247,13 +257,13 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 	if c.token == "" {
 		// Without a session, log in directly: a request carrying username=
 		// but no session cookie counts as a failed login to Adminer's throttle.
-		if err := c.refreshToken(ctx, !c.loggedIn, &loginTried); err != nil {
+		if err := c.refreshToken(ctx, database, !c.loggedIn, &loginTried); err != nil {
 			return nil, err
 		}
 	}
 	retried := false
 	for {
-		p, err := c.post(ctx, batch, limit)
+		p, err := c.post(ctx, database, batch, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -277,7 +287,7 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 		}
 		retried = true
 		c.token = ""
-		if err := c.refreshToken(ctx, expired, &loginTried); err != nil {
+		if err := c.refreshToken(ctx, database, expired, &loginTried); err != nil {
 			return nil, err
 		}
 	}
