@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,6 +81,18 @@ func (f *fake) Exec(ctx context.Context, batch string, limit int) ([]adminer.Blo
 		time.Sleep(f.delay)
 	}
 	stmt := stmtOf(batch)
+	blocks, err := f.answer(batch, stmt, limit)
+	// Fill wrapper echoes from the batch actually sent.
+	parts := strings.Split(batch, ";\n")
+	for i := 0; i < 4 && i < len(blocks); i++ {
+		if blocks[i].Kind == adminer.KindMessage && blocks[i].SQL == "" {
+			blocks[i].SQL = parts[i]
+		}
+	}
+	return blocks, err
+}
+
+func (f *fake) answer(batch, stmt string, limit int) ([]adminer.Block, error) {
 	switch {
 	case strings.Contains(stmt, "pg_proc"):
 		if f.initErr != nil {
@@ -241,12 +254,10 @@ func TestNotTruncatedAtExactLimit(t *testing.T) {
 func TestWrapperFailure(t *testing.T) {
 	f := &fake{super: "f"}
 	f.user = func(stmt string, limit int) []adminer.Block {
-		bl := tableBlocks(stmt, []string{"x"}, nil)
-		bl[1] = adminer.Block{Kind: adminer.KindError, Message: "Error in query (7): nope"}
-		return bl
+		return []adminer.Block{msg(), {Kind: adminer.KindError, Message: "Error in query (7): nope"}}
 	}
 	_, err := newBridge(f).Query(context.Background(), "dev", "select 1", 0)
-	if err == nil || !strings.Contains(err.Error(), "read-only wrapper failed") {
+	if err == nil || !strings.Contains(err.Error(), "read-only wrapper failed: Error in query (7): nope") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -328,6 +339,70 @@ func TestRoleWarnings(t *testing.T) {
 	}
 	if info.Superuser == nil || !*info.Superuser {
 		t.Errorf("superuser not set")
+	}
+	want := []string{
+		"login role is a superuser; a dedicated read-only role is recommended",
+		"risky extension installed: dblink",
+		"untrusted language installed: plpython3u",
+	}
+	if !reflect.DeepEqual(info.Warnings, want) {
+		t.Errorf("warnings = %q", info.Warnings)
+	}
+}
+
+func TestSuperuserParsing(t *testing.T) {
+	for v, want := range map[string]*bool{"t": ptr(true), "true": ptr(true), "1": ptr(true), "f": ptr(false), "false": ptr(false), "0": ptr(false), "x": nil} {
+		f := &fake{super: v}
+		b := newBridge(f)
+		if _, err := b.Query(context.Background(), "dev", "select 1", 0); err != nil {
+			t.Fatal(err)
+		}
+		info := b.ListEnvironments()[0]
+		if (info.Superuser == nil) != (want == nil) || (want != nil && *info.Superuser != *want) {
+			t.Errorf("%q: superuser = %v", v, info.Superuser)
+		}
+		if v == "x" && (len(info.Warnings) != 1 || info.Warnings[0] != "could not determine whether login role is a superuser (got x)") {
+			t.Errorf("warnings = %q", info.Warnings)
+		}
+	}
+}
+
+func ptr(b bool) *bool { return &b }
+
+func TestWrapperEchoMismatch(t *testing.T) {
+	f := &fake{super: "f"}
+	f.user = func(stmt string, limit int) []adminer.Block {
+		bl := tableBlocks(stmt, []string{"x"}, nil)
+		bl[0].SQL = "BEGIN"
+		return bl
+	}
+	_, err := newBridge(f).Query(context.Background(), "dev", "select 1", 0)
+	if err == nil || !strings.Contains(err.Error(), "read-only wrapper failed") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTruncatedEmptyEcho(t *testing.T) {
+	f := &fake{super: "f"}
+	f.user = func(stmt string, limit int) []adminer.Block {
+		bl := tableBlocks("", []string{"x"}, nil)
+		bl[4].Truncated = true
+		return bl
+	}
+	if _, err := newBridge(f).Query(context.Background(), "dev", "select 1", 0); err == nil {
+		t.Fatal("empty truncated echo must fail")
+	}
+}
+
+func TestListEnvironmentsDoesNotWaitForQuery(t *testing.T) {
+	f := &fake{super: "f", delay: 300 * time.Millisecond}
+	b := newBridge(f)
+	go b.Query(context.Background(), "dev", "select 1", 0)
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	b.ListEnvironments()
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("ListEnvironments blocked for %v", d)
 	}
 }
 
