@@ -36,6 +36,8 @@ The default config path is `~/.config/adminer-bridge/config.yaml`. Use the `--co
 | `lock_timeout` | Maximum wait for a lock | `2s` |
 | `http_timeout` | Timeout of one HTTP request to Adminer | `30s` |
 
+`statement_timeout` and `lock_timeout` must be at least `1ms`. `http_timeout` must be greater than `statement_timeout`.
+
 The bridge runs one query at a time for each environment. Other calls wait.
 
 ## Register with Claude Code

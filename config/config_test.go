@@ -93,3 +93,33 @@ func TestNamesSorted(t *testing.T) {
 		t.Fatal(n)
 	}
 }
+
+func TestLoadRejectsBadTimeouts(t *testing.T) {
+	cases := map[string]string{
+		"statement_timeout below 1ms": "    statement_timeout: 500us\n",
+		"statement_timeout negative":  "    statement_timeout: -1s\n",
+		"lock_timeout below 1ms":      "    lock_timeout: 999us\n",
+		"lock_timeout negative":       "    lock_timeout: -2s\n",
+		"http not above statement":    "    statement_timeout: 30s\n",
+		"http below statement":        "    statement_timeout: 20s\n    http_timeout: 10s\n",
+		"http negative":               "    http_timeout: -1s\n",
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeCfg(t, full+extra))
+			if err == nil || !strings.Contains(err.Error(), "local") || !strings.Contains(err.Error(), "timeout") {
+				t.Fatalf("got err %v, want a timeout error naming the environment", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsValidTimeouts(t *testing.T) {
+	c, err := Load(writeCfg(t, full+"    statement_timeout: 1ms\n    lock_timeout: 1ms\n    http_timeout: 2ms\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := c.Environments["local"]; e.StatementTimeout != time.Millisecond || e.HTTPTimeout != 2*time.Millisecond {
+		t.Fatalf("got %+v", e)
+	}
+}
