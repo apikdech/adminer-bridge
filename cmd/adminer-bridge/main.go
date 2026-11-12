@@ -1,5 +1,6 @@
 // Command adminer-bridge runs read-only SQL against Postgres through Adminer,
-// either as an MCP stdio server (serve) or as a one-shot CLI (query).
+// as an MCP server (serve: stdio, or streamable HTTP with --http) or as a
+// one-shot CLI (query).
 package main
 
 import (
@@ -9,8 +10,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +27,7 @@ var version = "dev"
 
 const usage = `usage:
   adminer-bridge serve [--config path]
+  adminer-bridge serve --http ADDR [--config path] [--token-env NAME]
   adminer-bridge query [--config path] --env NAME [--db NAME] [--max-rows N] [--json] "SQL"
 `
 
@@ -69,16 +73,37 @@ func serve(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "config file (default: $ADMINER_BRIDGE_CONFIG or ~/.config/adminer-bridge/config.yaml)")
+	httpAddr := fs.String("http", "", "serve MCP over streamable HTTP at /mcp on this address (e.g. :8090) instead of stdio")
+	tokenEnv := fs.String("token-env", defaultTokenEnv, "with --http: environment variable that holds the bearer token (at least 32 characters)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *httpAddr == "" {
+		b, err := loadBridge(*cfgPath)
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return mcpserver.New(b, version).Run(ctx, &mcp.StdioTransport{})
+	}
+
+	if fs.NArg() > 0 {
+		return fmt.Errorf("serve: unexpected argument %q", fs.Arg(0))
+	}
+	token, err := tokenFromEnv(*tokenEnv)
+	if err != nil {
 		return err
 	}
 	b, err := loadBridge(*cfgPath)
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	logger := log.New(stderr, "adminer-bridge: ", log.LstdFlags)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return mcpserver.New(b, version).Run(ctx, &mcp.StdioTransport{})
+	h := newHTTPHandler(mcpserver.New(b, version), token, logger)
+	return serveHTTP(ctx, *httpAddr, h, logger)
 }
 
 func query(args []string, stdout, stderr io.Writer) error {
