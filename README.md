@@ -60,7 +60,7 @@ The default row limit is 100. The maximum is 1000. If the result is cut, the out
 All three layers always apply. The bridge sends no SQL to Adminer without them, including its own catalog queries.
 
 1. **Parser.** The bridge parses the SQL with the real Postgres parser. It accepts one `SELECT` or `EXPLAIN` statement. It rejects `EXPLAIN ANALYZE`, `SELECT INTO`, locking clauses, and data-changing statements anywhere in the tree. It also rejects `$1`-style parameters.
-2. **Functions.** The bridge accepts only functions in `pg_catalog`. It also rejects a blocklist of dangerous names, for example `pg_sleep`, `set_config`, `pg_advisory_*`, `pg_read_file`, `lo_*`, `brin_*`, `pg_restore_*`, and functions that run SQL text such as `query_to_xml`, `ts_stat`, and `ts_rewrite`. The bridge reads the `pg_catalog` function list on the first connection. Until it has the list, it rejects all function calls.
+2. **Functions.** The bridge accepts only functions in `pg_catalog`. It sends each function call as `pg_catalog.<name>`, so Postgres cannot pick a function with the same name from another schema. It also rejects a blocklist of dangerous names, for example `pg_sleep`, `set_config`, `pg_advisory_*`, `pg_read_file`, `lo_*`, `brin_*`, `pg_restore_*`, and functions that run SQL text such as `query_to_xml`, `ts_stat`, and `ts_rewrite`. The bridge reads the `pg_catalog` function list on the first connection. Until it has the list, it rejects all function calls.
 3. **Read-only transaction.** The bridge sends the deparsed statement, not your text. The statement runs in `BEGIN TRANSACTION READ ONLY` with local timeouts, and ends with `ROLLBACK`. Postgres itself refuses writes.
 
 ## Residual risks

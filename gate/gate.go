@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Rule names the gate rule that rejected a statement.
@@ -48,7 +49,8 @@ func reject(rule Rule, format string, args ...any) *RejectError {
 type FuncSet map[string]struct{}
 
 // Validate checks sql against the read-only rules and returns the
-// statement deparsed from its parse tree. Any rejection is a *RejectError.
+// statement deparsed from its parse tree, with every unqualified function
+// call rewritten to pg_catalog.<name>. Any rejection is a *RejectError.
 func Validate(sql string, funcs FuncSet) (string, error) {
 	tree, err := pg_query.Parse(sql)
 	if err != nil {
@@ -77,6 +79,7 @@ func Validate(sql string, funcs FuncSet) (string, error) {
 		return "", rerr
 	}
 
+	qualifyFuncCalls(tree.ProtoReflect())
 	out, err := pg_query.Deparse(tree)
 	if err != nil {
 		return "", reject(RuleDeparse, "%v", err)
@@ -193,4 +196,30 @@ func checkFuncCall(node any, funcs FuncSet) *RejectError {
 		return reject(RuleFunction, "function %s is not an allowed built-in function", name)
 	}
 	return nil
+}
+
+// qualifyFuncCalls rewrites every unqualified FuncCall below m to
+// pg_catalog.<name>. The allowlist checks names only; the qualification
+// makes Postgres resolve the call to the pg_catalog function the gate
+// approved, and not to a same-named overload in another schema on the
+// search_path (for example a user-defined public.lower(integer)).
+func qualifyFuncCalls(m protoreflect.Message) {
+	if fc, ok := m.Interface().(*pg_query.FuncCall); ok && len(fc.GetFuncname()) == 1 {
+		fc.Funcname = append([]*pg_query.Node{pg_query.MakeStrNode("pg_catalog")}, fc.Funcname...)
+	}
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch {
+		case fd.IsMap():
+		case fd.IsList():
+			if fd.Kind() == protoreflect.MessageKind {
+				l := v.List()
+				for i := 0; i < l.Len(); i++ {
+					qualifyFuncCalls(l.Get(i).Message())
+				}
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			qualifyFuncCalls(v.Message())
+		}
+		return true
+	})
 }
