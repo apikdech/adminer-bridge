@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +42,7 @@ type fakeAdminer struct {
 	reqs       []recorded
 	logins     int
 	batches    []recorded
+	events     []string // "login" or "GET ?query" in arrival order
 }
 
 func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +60,22 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.reqs = append(f.reqs, rec)
-	serve := func(name string) { _, _ = w.Write(fixture(f.t, name)) }
+	serve := func(name string) {
+		// "raw:<status>:<body>" serves an inline non-fixture response.
+		if rest, ok := strings.CutPrefix(name, "raw:"); ok {
+			code, body, _ := strings.Cut(rest, ":")
+			n, _ := strconv.Atoi(code)
+			w.WriteHeader(n)
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write(fixture(f.t, name))
+	}
+	if r.Method == http.MethodPost && strings.Contains(r.Header.Get("Content-Type"), "urlencoded") {
+		f.events = append(f.events, "login")
+	} else {
+		f.events = append(f.events, r.Method+" "+r.URL.RawQuery)
+	}
 
 	switch {
 	case r.Method == http.MethodPost && r.PostForm.Has("auth[password]"):
@@ -121,6 +138,19 @@ func TestExecLogsInThenRuns(t *testing.T) {
 	if f.logins != 1 {
 		t.Errorf("logins = %d, want 1", f.logins)
 	}
+	// No request carrying username= may precede the first login: Adminer
+	// counts it as a failed login toward its throttle.
+	for _, e := range f.events {
+		if e == "login" {
+			break
+		}
+		if strings.Contains(e, "username=") {
+			t.Errorf("request before first login carried username=: %q", e)
+		}
+	}
+	if f.events[0] != "login" {
+		t.Errorf("first request = %q, want login", f.events[0])
+	}
 	_, _, wantTok, _, _ := ParsePage(fixture(t, "sql_page.html"))
 	b := f.batches[0].form
 	if b["token"] != wantTok || wantTok == "" {
@@ -152,8 +182,8 @@ func TestExecFailsAfterSecondLoginPage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if f.logins > 2 {
-		t.Errorf("logins = %d, want <= 2", f.logins)
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2", f.logins)
 	}
 	if len(f.batches) != 2 {
 		t.Errorf("batch posts = %d, want 2", len(f.batches))
@@ -163,6 +193,9 @@ func TestExecFailsAfterSecondLoginPage(t *testing.T) {
 	}
 }
 
+// Note: login_failed.html says "Session expired" (it was captured without the
+// session cookie); real wrong-password text is "Invalid credentials." (see
+// testdata/NOTES.md). The client keys on the login page, not the text.
 func TestLoginFailureNoRetry(t *testing.T) {
 	f := &fakeAdminer{loginPage: "login_failed.html", batchPages: []string{"ok.html"}}
 	c, _ := newTestClient(t, f)
@@ -201,6 +234,21 @@ func TestExecRetriesOnceOnBadToken(t *testing.T) {
 	}
 	if len(f.batches) != 2 {
 		t.Errorf("batch posts = %d, want 2", len(f.batches))
+	}
+	if f.batches[0].form["token"] == "" || f.batches[1].form["token"] == "" {
+		t.Errorf("missing token on a batch post")
+	}
+	// The retry must follow a token refetch: a SQL page GET between the posts.
+	posts, gets := 0, 0
+	for _, e := range f.events {
+		if strings.HasPrefix(e, "POST") {
+			posts++
+		} else if strings.HasPrefix(e, "GET") && posts == 1 {
+			gets++
+		}
+	}
+	if gets != 1 {
+		t.Errorf("GETs between batch posts = %d, want 1", gets)
 	}
 	if f.logins != 1 {
 		t.Errorf("logins = %d, want 1", f.logins)
@@ -249,5 +297,55 @@ func TestUnreachable(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), testPassword) {
 		t.Errorf("error leaks password")
+	}
+}
+
+func TestUnexpectedPagesFail(t *testing.T) {
+	cases := map[string]struct{ page, want string }{
+		"proxy 502": {"raw:502:<html><body>Bad Gateway</body></html>", "HTTP 502"},
+		"empty":     {"raw:200:", "unexpected adminer response"},
+		"other div.error": {"raw:200:<div id='content'><div class='error'>Too many unsuccessful logins, try again in 29 minute(s).</div></div>",
+			"Too many unsuccessful logins"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeAdminer{batchPages: []string{tc.page}}
+			c, _ := newTestClient(t, f)
+			blocks, err := c.Exec(context.Background(), "SELECT 1", 0)
+			if err == nil {
+				t.Fatalf("expected error, got blocks %v", blocks)
+			}
+			if !strings.Contains(err.Error(), "staging") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want env name and %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoginFailureLatchedForCooldown(t *testing.T) {
+	f := &fakeAdminer{loginPage: "login_failed.html", batchPages: []string{"ok.html"}}
+	c, _ := newTestClient(t, f)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) {
+		t.Fatalf("err = %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	if !errors.Is(err, ErrLogin) || !strings.Contains(err.Error(), "staging") || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("err = %v", err)
+	}
+	if f.logins != 1 {
+		t.Fatalf("logins = %d within cooldown, want 1", f.logins)
+	}
+	now = now.Add(31 * time.Second)
+	f.mu.Lock()
+	f.loginPage = ""
+	f.mu.Unlock()
+	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+		t.Fatalf("after cooldown: %v", err)
+	}
+	if f.logins != 2 {
+		t.Errorf("logins = %d after cooldown, want 2", f.logins)
 	}
 }

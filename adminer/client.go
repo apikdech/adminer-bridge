@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"adminer-bridge/config"
 )
@@ -30,7 +31,17 @@ type Client struct {
 	http     *http.Client
 	mu       sync.Mutex
 	token    string
+
+	loggedIn bool      // a login POST has succeeded on this client
+	loginErr error     // latched ErrLogin, see loginCooldown
+	loginAt  time.Time // when loginErr was latched
+	now      func() time.Time
 }
+
+// loginCooldown is how long a failed login is remembered. Exec calls inside
+// it return the cached error without sending credentials again, protecting
+// Adminer's failed-login throttle from a caller that retries.
+const loginCooldown = 60 * time.Second
 
 // NewClient prepares a client for env. It reads the password from the
 // environment variable named by env.PasswordEnv but makes no requests.
@@ -47,6 +58,7 @@ func NewClient(env *config.Env) (*Client, error) {
 		env:      env,
 		password: pw,
 		http:     &http.Client{Jar: jar, Timeout: env.HTTPTimeout},
+		now:      time.Now,
 	}, nil
 }
 
@@ -70,6 +82,7 @@ type page struct {
 	blocks  []Block
 	token   string
 	pageErr string
+	status  int
 }
 
 func (c *Client) do(req *http.Request) (*page, error) {
@@ -78,9 +91,12 @@ func (c *Client) do(req *http.Request) (*page, error) {
 		return nil, fmt.Errorf("environment %q: adminer request failed: %w", c.env.Name, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("environment %q: read adminer response: %w", c.env.Name, err)
+	}
+	if len(body) > maxPageBytes {
+		return nil, fmt.Errorf("environment %q: adminer response exceeds %d bytes", c.env.Name, maxPageBytes)
 	}
 	kind, blocks, token, pageErr, err := ParsePage(body)
 	if err != nil {
@@ -89,7 +105,7 @@ func (c *Client) do(req *http.Request) (*page, error) {
 	if kind == PageSQL && token != "" {
 		c.token = token
 	}
-	return &page{kind, blocks, token, pageErr}, nil
+	return &page{kind, blocks, token, pageErr, resp.StatusCode}, nil
 }
 
 func (c *Client) get(ctx context.Context) (*page, error) {
@@ -102,6 +118,20 @@ func (c *Client) get(ctx context.Context) (*page, error) {
 
 // login posts credentials once. A login page in the answer is ErrLogin.
 func (c *Client) login(ctx context.Context) error {
+	if c.loginErr != nil && c.now().Sub(c.loginAt) < loginCooldown {
+		return fmt.Errorf("environment %q: %w (login failed recently; retry after the %s cooldown, not sending credentials again): %v",
+			c.env.Name, ErrLogin, loginCooldown, c.loginErr)
+	}
+	err := c.doLogin(ctx)
+	if errors.Is(err, ErrLogin) {
+		c.loginErr, c.loginAt = err, c.now()
+	} else if err == nil {
+		c.loginErr, c.loggedIn = nil, true
+	}
+	return err
+}
+
+func (c *Client) doLogin(ctx context.Context) error {
 	form := url.Values{
 		"auth[driver]":   {"pgsql"},
 		"auth[server]":   {c.env.Server},
@@ -119,7 +149,7 @@ func (c *Client) login(ctx context.Context) error {
 		return err
 	}
 	if p.kind == PageLogin {
-		return fmt.Errorf("environment %q: %w: %s", c.env.Name, ErrLogin, p.pageErr)
+		return fmt.Errorf("environment %q: %w%s", c.env.Name, ErrLogin, suffix(p.pageErr))
 	}
 	return nil
 }
@@ -141,22 +171,29 @@ func (c *Client) fetchToken(ctx context.Context) (loginPage bool, err error) {
 	return false, nil
 }
 
-// refreshToken fetches a CSRF token, logging in (once) if there is no session.
-func (c *Client) refreshToken(ctx context.Context, allowLogin bool) error {
+// refreshToken fetches a CSRF token, logging in first when asked to. A login
+// page after that is ErrLogin: the login did not take.
+func (c *Client) refreshToken(ctx context.Context, doLogin bool) error {
+	if doLogin {
+		if err := c.login(ctx); err != nil {
+			return err
+		}
+	}
 	isLogin, err := c.fetchToken(ctx)
 	if err != nil {
 		return err
 	}
-	if !isLogin {
-		return nil
+	if isLogin {
+		return fmt.Errorf("environment %q: %w: adminer session not established", c.env.Name, ErrLogin)
 	}
-	if !allowLogin {
-		return fmt.Errorf("environment %q: %w: still on login page after login", c.env.Name, ErrLogin)
+	return nil
+}
+
+func suffix(msg string) string {
+	if msg == "" {
+		return ""
 	}
-	if err := c.login(ctx); err != nil {
-		return err
-	}
-	return c.refreshToken(ctx, false)
+	return ": " + msg
 }
 
 func (c *Client) post(ctx context.Context, batch string, limit int) (*page, error) {
@@ -192,7 +229,9 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 	defer c.mu.Unlock()
 
 	if c.token == "" {
-		if err := c.refreshToken(ctx, true); err != nil {
+		// Without a session, log in directly: a request carrying username=
+		// but no session cookie counts as a failed login to Adminer's throttle.
+		if err := c.refreshToken(ctx, !c.loggedIn); err != nil {
 			return nil, err
 		}
 	}
@@ -205,6 +244,12 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 		expired := p.kind == PageLogin
 		badToken := p.kind == PageSQL && strings.Contains(p.pageErr, "Invalid CSRF token")
 		if !expired && !badToken {
+			if p.pageErr != "" {
+				return nil, fmt.Errorf("environment %q: adminer error (HTTP %d): %s", c.env.Name, p.status, p.pageErr)
+			}
+			if len(p.blocks) == 0 {
+				return nil, fmt.Errorf("environment %q: unexpected adminer response (HTTP %d)", c.env.Name, p.status)
+			}
 			return p.blocks, nil
 		}
 		reason := "session expired"
@@ -216,12 +261,7 @@ func (c *Client) Exec(ctx context.Context, batch string, limit int) ([]Block, er
 		}
 		retried = true
 		c.token = ""
-		if expired {
-			if err := c.login(ctx); err != nil {
-				return nil, err
-			}
-		}
-		if err := c.refreshToken(ctx, false); err != nil {
+		if err := c.refreshToken(ctx, expired); err != nil {
 			return nil, err
 		}
 	}
