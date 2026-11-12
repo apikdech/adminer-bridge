@@ -22,6 +22,13 @@ import (
 // throttles IPs after failed logins.
 var ErrLogin = errors.New("adminer login failed")
 
+// ErrDatabase means Adminer answered a request for a non-default database
+// with the login page while the session worked: Adminer could not open that
+// database (it does not exist, or the role cannot connect). Adminer counts
+// this as a failed login and ends the session, so the client never logs in
+// again for it and latches the database for loginCooldown.
+var ErrDatabase = errors.New("adminer could not open the database")
+
 const maxPageBytes = 64 << 20
 
 // Client holds one Adminer session (cookie jar and CSRF token) for an environment.
@@ -32,10 +39,16 @@ type Client struct {
 	mu       sync.Mutex
 	token    string
 
-	loggedIn bool      // a login POST has succeeded on this client
-	loginErr error     // latched ErrLogin, see loginCooldown
-	loginAt  time.Time // when loginErr was latched
+	loggedIn bool               // a login POST has succeeded on this client
+	loginErr error              // latched ErrLogin, see loginCooldown
+	loginAt  time.Time          // when loginErr was latched
+	dbErr    map[string]dbLatch // latched ErrDatabase per non-default database
 	now      func() time.Time
+}
+
+type dbLatch struct {
+	err error
+	at  time.Time
 }
 
 // loginCooldown is how long a failed login is remembered. Exec calls inside
@@ -58,6 +71,7 @@ func NewClient(env *config.Env) (*Client, error) {
 		env:      env,
 		password: pw,
 		http:     &http.Client{Jar: jar, Timeout: env.HTTPTimeout},
+		dbErr:    map[string]dbLatch{},
 		now:      time.Now,
 	}, nil
 }
@@ -158,12 +172,13 @@ func (c *Client) doLogin(ctx context.Context) error {
 	return nil
 }
 
-// fetchToken GETs the SQL page of database and caches its CSRF token. The
-// token is per session, so it is valid for every database. It reports
-// whether the page was the login page (no session).
-func (c *Client) fetchToken(ctx context.Context, database string) (loginPage bool, err error) {
+// fetchToken GETs the SQL page of the default database and caches its CSRF
+// token. The token is per session, so it is valid for every database. The
+// default database is used so that a database Adminer cannot open is never
+// requested here. It reports whether the page was the login page (no session).
+func (c *Client) fetchToken(ctx context.Context) (loginPage bool, err error) {
 	c.token = ""
-	p, err := c.get(ctx, database)
+	p, err := c.get(ctx, c.env.Database)
 	if err != nil {
 		return false, err
 	}
@@ -181,14 +196,14 @@ func (c *Client) fetchToken(ctx context.Context, database string) (loginPage boo
 // attempted in this Exec call yet, it logs in once and fetches again. A login
 // page after a login is ErrLogin: the login did not take. *loginTried records
 // the login attempt for the calling Exec.
-func (c *Client) refreshToken(ctx context.Context, database string, doLogin bool, loginTried *bool) error {
+func (c *Client) refreshToken(ctx context.Context, doLogin bool, loginTried *bool) error {
 	if doLogin {
 		*loginTried = true
 		if err := c.login(ctx); err != nil {
 			return err
 		}
 	}
-	isLogin, err := c.fetchToken(ctx, database)
+	isLogin, err := c.fetchToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -199,7 +214,7 @@ func (c *Client) refreshToken(ctx context.Context, database string, doLogin bool
 		if err := c.login(ctx); err != nil {
 			return err
 		}
-		if isLogin, err = c.fetchToken(ctx, database); err != nil {
+		if isLogin, err = c.fetchToken(ctx); err != nil {
 			return err
 		}
 	}
@@ -246,6 +261,12 @@ func (c *Client) post(ctx context.Context, database, batch string, limit int) (*
 // expired session or an invalid CSRF token. The client does not check
 // database against the environment's allowlist; the bridge does that.
 // database must not be empty.
+//
+// For a database other than the default, a login page in answer to the
+// batch is ErrDatabase: the session was working (the client holds a token
+// from it), so Adminer failed to open that database. The client does not log
+// in again, and fails further Execs for that database without any request
+// for loginCooldown.
 func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([]Block, error) {
 	if database == "" {
 		return nil, fmt.Errorf("environment %q: no database given", c.env.Name)
@@ -253,11 +274,20 @@ func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	nonDefault := database != c.env.Database
+	if l, ok := c.dbErr[database]; ok && nonDefault {
+		if c.now().Sub(l.at) < loginCooldown {
+			return nil, fmt.Errorf("environment %q: database %q: %w (failed recently; not sending requests for the %s cooldown): %v",
+				c.env.Name, database, ErrDatabase, loginCooldown, l.err)
+		}
+		delete(c.dbErr, database)
+	}
+
 	loginTried := false
 	if c.token == "" {
 		// Without a session, log in directly: a request carrying username=
 		// but no session cookie counts as a failed login to Adminer's throttle.
-		if err := c.refreshToken(ctx, database, !c.loggedIn, &loginTried); err != nil {
+		if err := c.refreshToken(ctx, !c.loggedIn, &loginTried); err != nil {
 			return nil, err
 		}
 	}
@@ -268,6 +298,14 @@ func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([
 			return nil, err
 		}
 		expired := p.kind == PageLogin
+		if expired && nonDefault {
+			// Adminer restarted the session; the token is gone with it.
+			c.token = ""
+			err := fmt.Errorf("environment %q: database %q: %w: adminer answered with the login page%s; not logging in again",
+				c.env.Name, database, ErrDatabase, suffix(p.pageErr))
+			c.dbErr[database] = dbLatch{err: err, at: c.now()}
+			return nil, err
+		}
 		badToken := p.kind == PageSQL && strings.Contains(p.pageErr, "Invalid CSRF token")
 		if !expired && !badToken {
 			if p.pageErr != "" {
@@ -287,7 +325,7 @@ func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([
 		}
 		retried = true
 		c.token = ""
-		if err := c.refreshToken(ctx, database, expired, &loginTried); err != nil {
+		if err := c.refreshToken(ctx, expired, &loginTried); err != nil {
 			return nil, err
 		}
 	}

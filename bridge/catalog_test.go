@@ -138,8 +138,8 @@ func TestCatalogUsesRequestedDatabase(t *testing.T) {
 		t.Errorf("DescribeTable database = %q, want other", d.Database)
 	}
 	for _, c := range f.calls {
-		if c.db != "other" {
-			t.Errorf("batch sent to %q, want other", c.db)
+		if st := stmtOf(c.batch); !isSetup(st) && c.db != "other" {
+			t.Errorf("catalog batch %q sent to %q, want other", st, c.db)
 		}
 	}
 	d, err = b.DescribeTable(ctx, "local", "", "users")

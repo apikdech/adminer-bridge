@@ -48,6 +48,10 @@ The bridge runs one query at a time for each environment, for all its databases 
 
 One Adminer login can reach more than one database on the same server. For example: `staging`, `dev`, and `dev2`. Use the `databases` field to select the databases that a call can use. You do not need one environment for each database.
 
+> **Caution:** Each database in the list must exist, and the login role must be able to connect to it. Adminer counts a database that it cannot open as a failed login, and it ends the session for all databases of the environment. Too many failed logins block your IP address.
+>
+> The bridge protects against this. Before the first call to a database that is not the default database, it checks the database in the default database. If the database does not exist or the role cannot connect, the call fails with an error. The bridge sends nothing to Adminer with that database name. It remembers this result for 60 seconds. If Adminer still cannot open the database, the bridge does not log in again. Calls to that database then fail for 60 seconds and send no requests.
+
 1. Add the `databases` list to the environment:
 
    ```yaml
@@ -59,11 +63,13 @@ One Adminer login can reach more than one database on the same server. For examp
    ```
 
 2. Make sure that the list includes the value of `database`. If it does not, the config does not load.
-3. Make sure that each entry is a database name, and that no name occurs two times.
+3. Make sure that each entry is a database name, and that no name occurs two times. An entry must not start or end with a space.
 
 These rules apply:
 
 - If you do not set `databases`, the only allowed database is `database`.
+- An empty list, `databases: []`, is an error. The config does not load.
+- The `schema` of the environment applies to all its databases.
 - One login covers all allowed databases of the environment. The bridge changes only the database in the Adminer URL.
 - A call without a database uses the default database.
 - The name must match exactly. The match is case-sensitive.

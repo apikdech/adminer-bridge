@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"adminer-bridge/adminer"
 	"adminer-bridge/config"
@@ -68,6 +69,16 @@ const (
 	qLangs = "SELECT l.lanname FROM pg_catalog.pg_language l WHERE NOT l.lanpltrusted AND l.lanname NOT IN ('internal', 'c') ORDER BY l.lanname"
 )
 
+// preflightSQL finds database name if it exists, accepts connections and
+// the login role may connect to it. It runs in the default database.
+func preflightSQL(name string) string {
+	return "SELECT d.datname FROM pg_catalog.pg_database d WHERE d.datname = " + quoteLiteral(name) +
+		" AND d.datallowconn AND pg_catalog.has_database_privilege(d.datname, 'CONNECT')"
+}
+
+// missingCooldown is how long a failed preflight is remembered.
+const missingCooldown = 60 * time.Second
+
 // envState serializes all queries of one environment, whatever the database:
 // at most one query per environment is in flight.
 type envState struct {
@@ -82,12 +93,18 @@ type dbState struct {
 	name  string
 	funcs gate.FuncSet                 // guarded by envState.mu
 	info  atomic.Pointer[DatabaseInfo] // nil until first connect succeeds; set under envState.mu, read lock-free
+
+	// Preflight of a non-default database, guarded by envState.mu.
+	found      bool      // the preflight found the database; kept for the process lifetime
+	missingErr error     // the last preflight did not find it
+	missingAt  time.Time // when missingErr was set
 }
 
 // Bridge runs gated read-only queries against configured environments.
 type Bridge struct {
 	cfg  *config.Config
 	envs map[string]*envState
+	now  func() time.Time
 }
 
 // New builds a Bridge with real Adminer clients. No network traffic happens
@@ -106,7 +123,7 @@ func New(cfg *config.Config) (*Bridge, error) {
 
 // NewWithExecutors builds a Bridge over the given executors (for tests).
 func NewWithExecutors(cfg *config.Config, ex map[string]Executor) *Bridge {
-	b := &Bridge{cfg: cfg, envs: map[string]*envState{}}
+	b := &Bridge{cfg: cfg, envs: map[string]*envState{}, now: time.Now}
 	for name, env := range cfg.Environments {
 		st := &envState{env: env, ex: ex[name], dbs: map[string]*dbState{}}
 		for _, db := range env.AllowedDatabases() {
@@ -172,6 +189,11 @@ func (b *Bridge) query(ctx context.Context, env, database, sql string, limit int
 	defer st.mu.Unlock()
 
 	if ds.info.Load() == nil {
+		if ds.name != st.env.Database {
+			if err := b.preflight(ctx, st, ds); err != nil {
+				return nil, err
+			}
+		}
 		if err := st.init(ctx, ds); err != nil {
 			return nil, fmt.Errorf("environment %q, database %q: first connect failed: %w", env, ds.name, err)
 		}
@@ -188,6 +210,39 @@ func (b *Bridge) query(ctx context.Context, env, database, sql string, limit int
 	res.RowCount = len(res.Rows)
 	res.Database = ds.name
 	return res, nil
+}
+
+// preflight checks, in the default database, that the non-default database
+// ds exists and that the login role can connect to it. Called with st.mu held.
+//
+// Adminer must never get a database name it cannot open: it counts that as a
+// failed login against its IP throttle and ends the session for every
+// database of the environment. A found database is remembered for the
+// process lifetime; a missing one for missingCooldown.
+func (b *Bridge) preflight(ctx context.Context, st *envState, ds *dbState) error {
+	if ds.found {
+		return nil
+	}
+	if ds.missingErr != nil && b.now().Sub(ds.missingAt) < missingCooldown {
+		return ds.missingErr
+	}
+	def := st.dbs[st.env.Database]
+	if def.info.Load() == nil {
+		if err := st.init(ctx, def); err != nil {
+			return fmt.Errorf("environment %q, database %q: first connect failed: %w", st.env.Name, def.name, err)
+		}
+	}
+	res, err := st.run(ctx, def.name, preflightSQL(ds.name), def.funcs, 0)
+	if err != nil {
+		return fmt.Errorf("environment %q, database %q: check of database %q failed: %w", st.env.Name, def.name, ds.name, err)
+	}
+	if names := firstColumn(res); len(names) != 1 || names[0] != ds.name {
+		ds.missingErr = fmt.Errorf("database %q (environment %q) does not exist or the login role cannot connect to it", ds.name, st.env.Name)
+		ds.missingAt = b.now()
+		return ds.missingErr
+	}
+	ds.found, ds.missingErr = true, nil
+	return nil
 }
 
 // ListEnvironments describes every environment, sorted by name, with its
