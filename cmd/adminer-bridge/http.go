@@ -49,7 +49,9 @@ func newHTTPHandler(srv *mcp.Server, token string, logger *log.Logger) http.Hand
 	})
 	want := sha256.Sum256([]byte(token))
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// The auth scheme is case-insensitive (RFC 7235).
+		scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		ok = ok && strings.EqualFold(scheme, "Bearer")
 		sum := sha256.Sum256([]byte(got))
 		if !ok || subtle.ConstantTimeCompare(sum[:], want[:]) != 1 {
 			// Never log the presented token.

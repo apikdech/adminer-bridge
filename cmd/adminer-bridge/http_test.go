@@ -304,3 +304,30 @@ func TestServeHTTPShutsDownOnCancel(t *testing.T) {
 		t.Fatal("serveHTTP did not return after cancel")
 	}
 }
+
+func TestHTTPBearerSchemeIsCaseInsensitive(t *testing.T) {
+	ts, _ := newTestServer(t)
+	const initBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}`
+	for header, want := range map[string]int{
+		"Bearer " + testToken:               http.StatusOK,
+		"bearer " + testToken:               http.StatusOK,
+		"BEARER " + testToken:               http.StatusOK,
+		"bearer " + strings.Repeat("x", 32): http.StatusUnauthorized,
+		"Basic " + testToken:                http.StatusUnauthorized,
+		testToken:                           http.StatusUnauthorized,
+	} {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(initBody))
+		req.Header.Set("Authorization", header)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			scheme, _, _ := strings.Cut(header, " ")
+			t.Errorf("scheme %q: status = %d, want %d", scheme, resp.StatusCode, want)
+		}
+	}
+}
