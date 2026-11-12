@@ -71,6 +71,20 @@ func Load(path string) (*Config, error) {
 		if e.HTTPTimeout == 0 {
 			e.HTTPTimeout = 30 * time.Second
 		}
+		// The wrapper renders timeouts in whole milliseconds, and '0ms'
+		// means no limit in Postgres.
+		for _, d := range []struct {
+			field string
+			val   time.Duration
+		}{{"statement_timeout", e.StatementTimeout}, {"lock_timeout", e.LockTimeout}} {
+			if d.val < time.Millisecond {
+				return nil, fmt.Errorf("environment %q: %s must be at least 1ms, got %s", name, d.field, d.val)
+			}
+		}
+		if e.HTTPTimeout <= e.StatementTimeout {
+			return nil, fmt.Errorf("environment %q: http_timeout (%s) must be greater than statement_timeout (%s)",
+				name, e.HTTPTimeout, e.StatementTimeout)
+		}
 	}
 	return &c, nil
 }
