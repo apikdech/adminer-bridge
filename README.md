@@ -248,7 +248,7 @@ If the token variable is not set, or if the token has fewer than 32 characters, 
 
 ### Build and run the image
 
-The image uses `gcr.io/distroless/base-debian12:nonroot`. It has no shell and no curl. It runs as user 65532. The Dockerfile pins the base images by tag. For reproducible builds, you can pin them by digest. By default it runs `serve --http :8090` and reads the config from `/etc/adminer-bridge/config.yaml`. The Docker health check runs `adminer-bridge health`.
+The image uses `gcr.io/distroless/static-debian12:nonroot`, and the binary is linked statically. The image is about 21 MB. It has no libc, no shell, and no curl. It runs as user 65532. The Dockerfile pins the base images by tag. For reproducible builds, you can pin them by digest. By default it runs `serve --http :8090` and reads the config from `/etc/adminer-bridge/config.yaml`. The Docker health check runs `adminer-bridge health`.
 
 1. Build the image:
 
