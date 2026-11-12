@@ -11,7 +11,7 @@ adminer-bridge runs read-only SQL against Postgres through an Adminer web page. 
 ## Build
 
 ```bash
-go build
+go build -o adminer-bridge ./cmd/adminer-bridge
 ```
 
 The command creates the `adminer-bridge` binary in the repository root.
@@ -73,6 +73,7 @@ All three layers always apply. The bridge sends no SQL to Adminer without them, 
   - user-defined operators
   - user-defined casts and type input functions
 - The read-only transaction is the backstop for these paths. It does not stop side effects of functions that do not write to the database.
+- Adminer runs a hidden `EXPLAIN` for each statement that starts with `SELECT`. It runs it on a second database connection, after the statement and before the `ROLLBACK`. That connection is outside the read-only transaction and has no statement or lock timeouts. `EXPLAIN` without `ANALYZE` only plans the statement and does not run it. But planning takes table locks: if a migration is waiting for a lock, the plan can wait behind it while the bridge's transaction stays open. In the worst case, the migration waits until `idle_in_transaction_session_timeout` (the same as `statement_timeout`, 15s by default) ends the bridge's transaction. The bridge cannot turn this `EXPLAIN` off, because the Adminer option that does so also removes the statement echoes that the bridge checks.
 - **The real fix is a dedicated read-only database role.** Use one when you can.
 - On the first connection, the bridge checks the login role. It warns if the role is a superuser or if risky extensions or untrusted languages exist. The warnings appear in `list_environments`. The check only warns. It does not refuse to connect.
 

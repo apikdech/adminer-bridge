@@ -89,6 +89,26 @@ re-runs EXPLAIN and holds ANOTHER result table:
 The parser MUST ignore tables inside `div.explain`, or it will see a bogus second
 result for the statement.
 
+### The hidden EXPLAIN runs on a second connection (Adminer 5.4.1 source)
+
+The `div.explain` block is not free. In the SQL page code Adminer opens a
+second database connection (`$h=connect()`). For each statement whose text
+starts with `SELECT` (after whitespace, comments and parentheses), it runs
+`EXPLAIN <statement>` on that second connection. This happens after the
+statement runs and before the batch's `ROLLBACK`.
+
+- The second connection is outside our `BEGIN TRANSACTION READ ONLY` and
+  does not get our `SET LOCAL` statement or lock timeouts.
+- `EXPLAIN` without `ANALYZE` only plans the statement. It does not run it.
+- Planning takes AccessShareLock on the tables. If a migration that wants
+  AccessExclusiveLock is queued, that EXPLAIN can wait behind it, while our
+  first connection holds its open transaction. In the worst case the
+  migration waits on our transaction until `idle_in_transaction_session_timeout`
+  (set to the statement timeout, 15s by default) ends it.
+- The `only_errors` form field would suppress the EXPLAIN, but it also
+  suppresses the statement echoes that the bridge verifies. So the bridge
+  cannot use it.
+
 ## Long echoed statements (long_stmt.html)
 
 Adminer SHORTENS long statements in `<pre id='sql-N'>`. A 1200+ char statement is
