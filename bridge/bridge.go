@@ -98,15 +98,31 @@ func NewWithExecutors(cfg *config.Config, ex map[string]Executor) *Bridge {
 // Query validates sql, runs it read-only in env and returns at most maxRows rows.
 // Gate rejections are returned as *gate.RejectError.
 func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Result, error) {
-	st, ok := b.envs[env]
-	if !ok {
-		return nil, fmt.Errorf("unknown environment %q; valid environments: %s", env, strings.Join(b.cfg.Names(), ", "))
-	}
 	if maxRows <= 0 {
 		maxRows = DefaultMaxRows
 	}
 	if maxRows > HardMaxRows {
 		maxRows = HardMaxRows
+	}
+	res, err := b.query(ctx, env, sql, maxRows+1)
+	if err != nil {
+		return nil, err
+	}
+	if len(res.Rows) > maxRows {
+		res.Rows = res.Rows[:maxRows]
+		res.Truncated = true
+	}
+	res.RowCount = len(res.Rows)
+	return res, nil
+}
+
+// query is the single gated path shared by Query and the catalog helpers:
+// env lookup, per-env lock, first-connect init, gate.Validate with the loaded
+// FuncSet, wrap, execute, echo check. limit is passed to Exec (0 = unlimited).
+func (b *Bridge) query(ctx context.Context, env, sql string, limit int) (*Result, error) {
+	st, ok := b.envs[env]
+	if !ok {
+		return nil, fmt.Errorf("unknown environment %q; valid environments: %s", env, strings.Join(b.cfg.Names(), ", "))
 	}
 
 	st.mu.Lock()
@@ -118,23 +134,13 @@ func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Resu
 		}
 	}
 
-	stmt, err := gate.Validate(sql, st.funcs)
+	res, err := st.run(ctx, sql, st.funcs, limit)
 	if err != nil {
-		return nil, err
-	}
-	batch := st.wrap(stmt)
-	blocks, err := st.ex.Exec(ctx, batch, maxRows+1)
-	if err != nil {
+		var rej *gate.RejectError
+		if errors.As(err, &rej) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("environment %q: %w", env, err)
-	}
-	res, err := checkBlocks(blocks, batch, stmt)
-	if err != nil {
-		return nil, fmt.Errorf("environment %q: %w", env, err)
-	}
-	res.ExecutedSQL = stmt
-	if len(res.Rows) > maxRows {
-		res.Rows = res.Rows[:maxRows]
-		res.Truncated = true
 	}
 	res.RowCount = len(res.Rows)
 	return res, nil
@@ -169,7 +175,12 @@ func (st *envState) run(ctx context.Context, sql string, fs gate.FuncSet, limit 
 	if err != nil {
 		return nil, err
 	}
-	return checkBlocks(blocks, batch, stmt)
+	res, err := checkBlocks(blocks, batch, stmt)
+	if err != nil {
+		return nil, err
+	}
+	res.ExecutedSQL = stmt
+	return res, nil
 }
 
 // firstColumn returns the first column of every row (NULL cells are skipped).
