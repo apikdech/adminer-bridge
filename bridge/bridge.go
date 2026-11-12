@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"adminer-bridge/adminer"
 	"adminer-bridge/config"
@@ -62,7 +63,7 @@ type envState struct {
 	ex    Executor
 	mu    sync.Mutex
 	funcs gate.FuncSet
-	info  *EnvInfo // nil until first connect succeeds; guarded by mu
+	info  atomic.Pointer[EnvInfo] // nil until first connect succeeds; set under mu, read lock-free
 }
 
 // Bridge runs gated read-only queries against configured environments.
@@ -111,7 +112,7 @@ func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Resu
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
-	if st.info == nil {
+	if st.info.Load() == nil {
 		if err := st.init(ctx); err != nil {
 			return nil, fmt.Errorf("environment %q: first connect failed: %w", env, err)
 		}
@@ -121,11 +122,12 @@ func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Resu
 	if err != nil {
 		return nil, err
 	}
-	blocks, err := st.ex.Exec(ctx, st.wrap(stmt), maxRows+1)
+	batch := st.wrap(stmt)
+	blocks, err := st.ex.Exec(ctx, batch, maxRows+1)
 	if err != nil {
 		return nil, fmt.Errorf("environment %q: %w", env, err)
 	}
-	res, err := checkBlocks(blocks, stmt)
+	res, err := checkBlocks(blocks, batch, stmt)
 	if err != nil {
 		return nil, fmt.Errorf("environment %q: %w", env, err)
 	}
@@ -143,13 +145,11 @@ func (b *Bridge) ListEnvironments() []EnvInfo {
 	var out []EnvInfo
 	for _, name := range b.cfg.Names() {
 		st := b.envs[name]
-		st.mu.Lock()
-		if st.info != nil {
-			out = append(out, *st.info)
+		if info := st.info.Load(); info != nil {
+			out = append(out, *info)
 		} else {
 			out = append(out, EnvInfo{Name: name, URL: st.env.URL, Database: st.env.Database, Schema: st.env.Schema})
 		}
-		st.mu.Unlock()
 	}
 	return out
 }
@@ -164,11 +164,12 @@ func (st *envState) run(ctx context.Context, sql string, fs gate.FuncSet, limit 
 	if err != nil {
 		return nil, err
 	}
-	blocks, err := st.ex.Exec(ctx, st.wrap(stmt), limit)
+	batch := st.wrap(stmt)
+	blocks, err := st.ex.Exec(ctx, batch, limit)
 	if err != nil {
 		return nil, err
 	}
-	return checkBlocks(blocks, stmt)
+	return checkBlocks(blocks, batch, stmt)
 }
 
 // firstColumn returns the first column of every row (NULL cells are skipped).
@@ -219,10 +220,18 @@ func (st *envState) init(ctx context.Context) error {
 		Connected: true, Extensions: exts, UntrustedLanguages: langs,
 	}
 	if len(super) > 0 {
-		v := super[0] == "t"
-		info.Superuser = &v
-		if v {
+		// Rendering of booleans depends on Adminer's PHP pg driver; accept
+		// the common spellings and refuse to guess otherwise.
+		switch super[0] {
+		case "t", "true", "1":
+			v := true
+			info.Superuser = &v
 			info.Warnings = append(info.Warnings, "login role is a superuser; a dedicated read-only role is recommended")
+		case "f", "false", "0":
+			v := false
+			info.Superuser = &v
+		default:
+			info.Warnings = append(info.Warnings, fmt.Sprintf("could not determine whether login role is a superuser (got %s)", super[0]))
 		}
 	}
 	for _, e := range exts {
@@ -238,7 +247,8 @@ func (st *envState) init(ctx context.Context) error {
 	for _, w := range info.Warnings {
 		fmt.Fprintf(os.Stderr, "adminer-bridge: environment %q: warning: %s\n", st.env.Name, w)
 	}
-	st.funcs, st.info = funcs, info
+	st.funcs = funcs
+	st.info.Store(info)
 	return nil
 }
 
@@ -251,18 +261,29 @@ func (st *envState) init(ctx context.Context) error {
 // has no ';' or line breaks (gate rejects them), so the echo must equal it
 // exactly; a Truncated echo (Adminer shortens long statements) must be a
 // prefix of it.
-func checkBlocks(blocks []adminer.Block, stmt string) (*Result, error) {
-	if len(blocks) <= gate.WrappedStmtIndex {
-		return nil, fmt.Errorf("unexpected Adminer response: got %d result blocks, need at least %d", len(blocks), gate.WrappedStmtIndex+1)
-	}
-	for _, bl := range blocks[:gate.WrappedStmtIndex] {
+func checkBlocks(blocks []adminer.Block, batch, stmt string) (*Result, error) {
+	// With error_stops, a failing wrapper statement ends the response early,
+	// so look for failures before checking the block count.
+	n := min(len(blocks), gate.WrappedStmtIndex)
+	for _, bl := range blocks[:n] {
 		if bl.Kind != adminer.KindMessage {
 			return nil, fmt.Errorf("read-only wrapper failed: %s", bl.Message)
 		}
 	}
+	if len(blocks) <= gate.WrappedStmtIndex {
+		return nil, fmt.Errorf("unexpected Adminer response: got %d result blocks, need at least %d", len(blocks), gate.WrappedStmtIndex+1)
+	}
+	// The wrapper statements Adminer echoed must be the ones we sent
+	// (confirms BEGIN TRANSACTION READ ONLY and the SET LOCALs ran).
+	parts := strings.Split(batch, ";\n")
+	for i := 0; i < gate.WrappedStmtIndex; i++ {
+		if i >= len(parts) || blocks[i].SQL != parts[i] {
+			return nil, errors.New("read-only wrapper failed: Adminer echoed an unexpected wrapper statement")
+		}
+	}
 	b := blocks[gate.WrappedStmtIndex]
 	if b.Truncated {
-		if !strings.HasPrefix(stmt, b.SQL) {
+		if b.SQL == "" || !strings.HasPrefix(stmt, b.SQL) {
 			return nil, errMismatch
 		}
 	} else if b.SQL != stmt {
