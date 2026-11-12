@@ -17,7 +17,9 @@ import (
 	"adminer-bridge/gate"
 )
 
-// Executor runs a batch against Adminer. *adminer.Client implements it.
+// Executor runs a batch in one database through Adminer. *adminer.Client
+// implements it. database is never empty and always on the environment's
+// allowlist.
 type Executor interface {
 	Exec(ctx context.Context, database, batch string, limit int) ([]adminer.Block, error)
 }
@@ -29,14 +31,22 @@ type Result struct {
 	RowCount    int         `json:"row_count"`
 	Truncated   bool        `json:"truncated"`
 	ExecutedSQL string      `json:"executed_sql"`
+	Database    string      `json:"database"` // the database that answered
 }
 
-// EnvInfo describes one environment and what was learned on first connect.
+// EnvInfo describes one environment and its allowed databases.
 type EnvInfo struct {
+	Name      string         `json:"name"`
+	URL       string         `json:"url"`
+	Schema    string         `json:"schema"`
+	Database  string         `json:"database"`  // default database
+	Databases []DatabaseInfo `json:"databases"` // allowed databases, in config order
+}
+
+// DatabaseInfo describes one allowed database and what was learned on its
+// first connect.
+type DatabaseInfo struct {
 	Name               string   `json:"name"`
-	URL                string   `json:"url"`
-	Database           string   `json:"database"`
-	Schema             string   `json:"schema"`
 	Connected          bool     `json:"connected"`
 	Superuser          *bool    `json:"superuser,omitempty"`
 	Extensions         []string `json:"extensions,omitempty"`
@@ -58,12 +68,20 @@ const (
 	qLangs = "SELECT l.lanname FROM pg_catalog.pg_language l WHERE NOT l.lanpltrusted AND l.lanname NOT IN ('internal', 'c') ORDER BY l.lanname"
 )
 
+// envState serializes all queries of one environment, whatever the database:
+// at most one query per environment is in flight.
 type envState struct {
-	env   *config.Env
-	ex    Executor
-	mu    sync.Mutex
-	funcs gate.FuncSet
-	info  atomic.Pointer[EnvInfo] // nil until first connect succeeds; set under mu, read lock-free
+	env *config.Env
+	ex  Executor
+	mu  sync.Mutex
+	dbs map[string]*dbState // one per allowed database; built once, never changed
+}
+
+// dbState holds what first connect learned about one database.
+type dbState struct {
+	name  string
+	funcs gate.FuncSet                 // guarded by envState.mu
+	info  atomic.Pointer[DatabaseInfo] // nil until first connect succeeds; set under envState.mu, read lock-free
 }
 
 // Bridge runs gated read-only queries against configured environments.
@@ -90,21 +108,27 @@ func New(cfg *config.Config) (*Bridge, error) {
 func NewWithExecutors(cfg *config.Config, ex map[string]Executor) *Bridge {
 	b := &Bridge{cfg: cfg, envs: map[string]*envState{}}
 	for name, env := range cfg.Environments {
-		b.envs[name] = &envState{env: env, ex: ex[name]}
+		st := &envState{env: env, ex: ex[name], dbs: map[string]*dbState{}}
+		for _, db := range env.AllowedDatabases() {
+			st.dbs[db] = &dbState{name: db}
+		}
+		b.envs[name] = st
 	}
 	return b
 }
 
-// Query validates sql, runs it read-only in env and returns at most maxRows rows.
-// Gate rejections are returned as *gate.RejectError.
-func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Result, error) {
+// Query validates sql, runs it read-only in database of env and returns at
+// most maxRows rows. database "" is the environment's default database; any
+// other value must be on the environment's allowlist. Gate rejections are
+// returned as *gate.RejectError.
+func (b *Bridge) Query(ctx context.Context, env, database, sql string, maxRows int) (*Result, error) {
 	if maxRows <= 0 {
 		maxRows = DefaultMaxRows
 	}
 	if maxRows > HardMaxRows {
 		maxRows = HardMaxRows
 	}
-	res, err := b.query(ctx, env, sql, maxRows+1)
+	res, err := b.query(ctx, env, database, sql, maxRows+1)
 	if err != nil {
 		return nil, err
 	}
@@ -116,46 +140,72 @@ func (b *Bridge) Query(ctx context.Context, env, sql string, maxRows int) (*Resu
 	return res, nil
 }
 
-// query is the single gated path shared by Query and the catalog helpers:
-// env lookup, per-env lock, first-connect init, gate.Validate with the loaded
-// FuncSet, wrap, execute, echo check. limit is passed to Exec (0 = unlimited).
-func (b *Bridge) query(ctx context.Context, env, sql string, limit int) (*Result, error) {
+// lookup returns the state of env and of its database (resolved against the
+// allowlist; "" is the default). Nothing is sent to Adminer.
+func (b *Bridge) lookup(env, database string) (*envState, *dbState, error) {
 	st, ok := b.envs[env]
 	if !ok {
-		return nil, fmt.Errorf("unknown environment %q; valid environments: %s", env, strings.Join(b.cfg.Names(), ", "))
+		return nil, nil, fmt.Errorf("unknown environment %q; valid environments: %s", env, strings.Join(b.cfg.Names(), ", "))
+	}
+	name, err := st.env.ResolveDatabase(database)
+	if err != nil {
+		return nil, nil, err
+	}
+	ds, ok := st.dbs[name]
+	if !ok { // unreachable: dbs is built from the same allowlist
+		return nil, nil, fmt.Errorf("environment %q: database %q has no state", env, name)
+	}
+	return st, ds, nil
+}
+
+// query is the single gated path shared by Query and the catalog helpers:
+// env lookup, database resolution, per-env lock, per-database first-connect
+// init, gate.Validate with that database's FuncSet, wrap, execute, echo
+// check. limit is passed to Exec (0 = unlimited).
+func (b *Bridge) query(ctx context.Context, env, database, sql string, limit int) (*Result, error) {
+	st, ds, err := b.lookup(env, database)
+	if err != nil {
+		return nil, err
 	}
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
-	if st.info.Load() == nil {
-		if err := st.init(ctx); err != nil {
-			return nil, fmt.Errorf("environment %q: first connect failed: %w", env, err)
+	if ds.info.Load() == nil {
+		if err := st.init(ctx, ds); err != nil {
+			return nil, fmt.Errorf("environment %q, database %q: first connect failed: %w", env, ds.name, err)
 		}
 	}
 
-	res, err := st.run(ctx, sql, st.funcs, limit)
+	res, err := st.run(ctx, ds.name, sql, ds.funcs, limit)
 	if err != nil {
 		var rej *gate.RejectError
 		if errors.As(err, &rej) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("environment %q: %w", env, err)
+		return nil, fmt.Errorf("environment %q, database %q: %w", env, ds.name, err)
 	}
 	res.RowCount = len(res.Rows)
+	res.Database = ds.name
 	return res, nil
 }
 
-// ListEnvironments describes every environment, sorted by name.
+// ListEnvironments describes every environment, sorted by name, with its
+// allowed databases in config order. It takes no locks, so it never waits
+// for a running query.
 func (b *Bridge) ListEnvironments() []EnvInfo {
 	var out []EnvInfo
 	for _, name := range b.cfg.Names() {
 		st := b.envs[name]
-		if info := st.info.Load(); info != nil {
-			out = append(out, *info)
-		} else {
-			out = append(out, EnvInfo{Name: name, URL: st.env.URL, Database: st.env.Database, Schema: st.env.Schema})
+		e := EnvInfo{Name: name, URL: st.env.URL, Schema: st.env.Schema, Database: st.env.Database}
+		for _, db := range st.env.AllowedDatabases() {
+			if info := st.dbs[db].info.Load(); info != nil {
+				e.Databases = append(e.Databases, *info)
+			} else {
+				e.Databases = append(e.Databases, DatabaseInfo{Name: db})
+			}
 		}
+		out = append(out, e)
 	}
 	return out
 }
@@ -164,14 +214,14 @@ func (st *envState) wrap(stmt string) string {
 	return gate.Wrap(stmt, gate.Timeouts{Statement: st.env.StatementTimeout, Lock: st.env.LockTimeout})
 }
 
-// run validates (with fs), wraps, executes and checks one statement.
-func (st *envState) run(ctx context.Context, sql string, fs gate.FuncSet, limit int) (*Result, error) {
+// run validates (with fs), wraps, executes in database and checks one statement.
+func (st *envState) run(ctx context.Context, database, sql string, fs gate.FuncSet, limit int) (*Result, error) {
 	stmt, err := gate.Validate(sql, fs)
 	if err != nil {
 		return nil, err
 	}
 	batch := st.wrap(stmt)
-	blocks, err := st.ex.Exec(ctx, st.env.Database, batch, limit)
+	blocks, err := st.ex.Exec(ctx, database, batch, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -194,12 +244,13 @@ func firstColumn(r *Result) []string {
 	return out
 }
 
-// init loads the function allow-list and role facts. Called with st.mu held;
-// on failure st.info stays nil so the next call retries.
-func (st *envState) init(ctx context.Context) error {
+// init loads the function allow-list and role facts of database ds. Called
+// with st.mu held; on failure ds.info stays nil so the next call retries.
+// Extensions and languages differ per database, so each database has its own.
+func (st *envState) init(ctx context.Context, ds *dbState) error {
 	var empty gate.FuncSet
 	step := func(q string) ([]string, error) {
-		r, err := st.run(ctx, q, empty, 0)
+		r, err := st.run(ctx, ds.name, q, empty, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -226,10 +277,7 @@ func (st *envState) init(ctx context.Context) error {
 	for _, p := range procs {
 		funcs[p] = struct{}{}
 	}
-	info := &EnvInfo{
-		Name: st.env.Name, URL: st.env.URL, Database: st.env.Database, Schema: st.env.Schema,
-		Connected: true, Extensions: exts, UntrustedLanguages: langs,
-	}
+	info := &DatabaseInfo{Name: ds.name, Connected: true, Extensions: exts, UntrustedLanguages: langs}
 	if len(super) > 0 {
 		// Rendering of booleans depends on Adminer's PHP pg driver; accept
 		// the common spellings and refuse to guess otherwise.
@@ -256,10 +304,10 @@ func (st *envState) init(ctx context.Context) error {
 		info.Warnings = append(info.Warnings, "untrusted language installed: "+l)
 	}
 	for _, w := range info.Warnings {
-		fmt.Fprintf(os.Stderr, "adminer-bridge: environment %q: warning: %s\n", st.env.Name, w)
+		fmt.Fprintf(os.Stderr, "adminer-bridge: environment %q, database %q: warning: %s\n", st.env.Name, ds.name, w)
 	}
-	st.funcs = funcs
-	st.info.Store(info)
+	ds.funcs = funcs
+	ds.info.Store(info)
 	return nil
 }
 
