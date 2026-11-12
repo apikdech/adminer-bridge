@@ -7,12 +7,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=1 go build -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
+# Link statically (libc included) so the runtime image needs no libc.
+# netgo/osusergo: pure-Go DNS and user lookup, so no glibc NSS at run time.
+RUN CGO_ENABLED=1 go build -trimpath -tags netgo,osusergo \
+      -ldflags="-s -w -X main.version=${VERSION} -linkmode external -extldflags -static" \
       -o /out/adminer-bridge ./cmd/adminer-bridge
 
-# Runtime stage: glibc and CA certificates, no shell, runs as uid 65532.
-FROM gcr.io/distroless/base-debian12:nonroot
+# Runtime stage: CA certificates and tzdata only, no libc, no shell, uid 65532.
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/adminer-bridge /adminer-bridge
 # Mount the config here (read-only). Passwords and the token come from
 # environment variables, never from the image.
