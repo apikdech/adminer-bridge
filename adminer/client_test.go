@@ -468,8 +468,51 @@ func TestExecTokenFetchUsesDefaultDatabase(t *testing.T) {
 	}
 }
 
+// dbErrorPage is the login page Adminer shows when it cannot open a database
+// inside a live session: the connection error replaces "Session expired".
+func dbErrorPage(t *testing.T) string {
+	t.Helper()
+	page := strings.Replace(string(fixture(t, "login_failed.html")),
+		"Session expired, please login again.", `FATAL:  database "broken" does not exist`, 1)
+	if strings.Contains(page, "Session expired") {
+		t.Fatal("fixture still says Session expired")
+	}
+	return "raw:403:" + page
+}
+
+// A non-default database that answers "Session expired" is an idle session
+// expiry, not a database failure: re-login once and resend, as for the
+// default database.
+func TestExecNonDefaultDatabaseSessionExpiredRelogins(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html", "login_failed.html", "ok.html"}}
+	c, _ := newTestClient(t, f)
+	ctx := context.Background()
+	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, "postgres", "SELECT 1", 0); err != nil {
+		t.Fatalf("expired session on postgres: %v", err)
+	}
+	if f.logins != 2 {
+		t.Errorf("logins = %d, want 2 (one re-login)", f.logins)
+	}
+	if len(f.batches) != 3 || f.batches[2].query.Get("db") != "postgres" {
+		t.Errorf("batches = %d, want the postgres batch resent once", len(f.batches))
+	}
+	if _, ok := c.dbErr["postgres"]; ok {
+		t.Error("postgres latched after an expired session")
+	}
+	n := len(f.batches)
+	if _, err := c.Exec(ctx, "postgres", "SELECT 1", 0); err != nil {
+		t.Fatalf("next Exec: %v", err)
+	}
+	if len(f.batches) != n+1 || f.logins != 2 {
+		t.Errorf("next Exec: batches +%d, logins %d; want +1, 2", len(f.batches)-n, f.logins)
+	}
+}
+
 func TestExecNonDefaultDatabaseLoginPageNoRelogin(t *testing.T) {
-	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": "login_failed.html"}}
+	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": dbErrorPage(t)}}
 	c, _ := newTestClient(t, f)
 	now := time.Now()
 	c.now = func() time.Time { return now }
@@ -479,7 +522,7 @@ func TestExecNonDefaultDatabaseLoginPageNoRelogin(t *testing.T) {
 	if !errors.Is(err, ErrDatabase) || errors.Is(err, ErrLogin) {
 		t.Fatalf("err = %v, want ErrDatabase and not ErrLogin", err)
 	}
-	for _, want := range []string{`"staging"`, `"broken"`, "Session expired"} {
+	for _, want := range []string{`"staging"`, `"broken"`, `database "broken" does not exist`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, want it to contain %s", err, want)
 		}
@@ -525,7 +568,7 @@ func TestExecNonDefaultDatabaseLoginPageNoRelogin(t *testing.T) {
 }
 
 func TestExecNonDefaultDatabaseFailureClearsToken(t *testing.T) {
-	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": "login_failed.html"}}
+	f := &fakeAdminer{batchPages: []string{"ok.html"}, dbPages: map[string]string{"broken": dbErrorPage(t)}}
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
 	if _, err := c.Exec(ctx, "glchat", "SELECT 1", 0); err != nil {

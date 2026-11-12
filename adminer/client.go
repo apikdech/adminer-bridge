@@ -29,6 +29,16 @@ var ErrLogin = errors.New("adminer login failed")
 // again for it and latches the database for loginCooldown.
 var ErrDatabase = errors.New("adminer could not open the database")
 
+// sessionExpiredMarker is the page error of an idle session expiry. In
+// Adminer 5.4.1, auth_error() shows "Session expired, please login again."
+// when the session cookie is present but $_SESSION["token"] is gone, and
+// that branch does not call add_invalid_login. Every other auth_error
+// (for example a failed database connection inside a live session) counts a
+// failed login and shows the connection error instead. The text is in
+// testdata/login_failed.html; the client sends no Accept-Language, so
+// Adminer answers in English.
+const sessionExpiredMarker = "Session expired"
+
 const maxPageBytes = 64 << 20
 
 // Client holds one Adminer session (cookie jar and CSRF token) for an environment.
@@ -263,10 +273,11 @@ func (c *Client) post(ctx context.Context, database, batch string, limit int) (*
 // database must not be empty.
 //
 // For a database other than the default, a login page in answer to the
-// batch is ErrDatabase: the session was working (the client holds a token
-// from it), so Adminer failed to open that database. The client does not log
-// in again, and fails further Execs for that database without any request
-// for loginCooldown.
+// batch that says "Session expired" is an idle expiry and is handled like
+// one for the default database. Any other login page is ErrDatabase: the
+// session was working (the client holds a token from it), so Adminer failed
+// to open that database. The client does not log in again, and fails further
+// Execs for that database without any request for loginCooldown.
 func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([]Block, error) {
 	if database == "" {
 		return nil, fmt.Errorf("environment %q: no database given", c.env.Name)
@@ -298,7 +309,7 @@ func (c *Client) Exec(ctx context.Context, database, batch string, limit int) ([
 			return nil, err
 		}
 		expired := p.kind == PageLogin
-		if expired && nonDefault {
+		if expired && nonDefault && !strings.Contains(p.pageErr, sessionExpiredMarker) {
 			// Adminer restarted the session; the token is gone with it.
 			c.token = ""
 			err := fmt.Errorf("environment %q: database %q: %w: adminer answered with the login page%s; not logging in again",
