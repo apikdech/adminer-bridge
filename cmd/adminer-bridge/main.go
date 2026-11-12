@@ -28,6 +28,7 @@ var version = "dev"
 const usage = `usage:
   adminer-bridge serve [--config path]
   adminer-bridge serve --http ADDR [--config path] [--token-env NAME]
+  adminer-bridge health [--url URL]
   adminer-bridge query [--config path] --env NAME [--db NAME] [--max-rows N] [--json] "SQL"
 `
 
@@ -50,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return serve(args[1:], stderr)
 	case "query":
 		return query(args[1:], stdout, stderr)
+	case "health":
+		return health(args[1:], stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stderr, usage)
 		return flag.ErrHelp
