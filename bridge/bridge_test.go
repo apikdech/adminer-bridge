@@ -68,7 +68,7 @@ func col(vals []string) [][]*string {
 	return r
 }
 
-func (f *fake) Exec(ctx context.Context, batch string, limit int) ([]adminer.Block, error) {
+func (f *fake) Exec(ctx context.Context, _, batch string, limit int) ([]adminer.Block, error) {
 	n := atomic.AddInt32(&f.inflight, 1)
 	defer atomic.AddInt32(&f.inflight, -1)
 	f.mu.Lock()

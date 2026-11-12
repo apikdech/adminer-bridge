@@ -19,7 +19,7 @@ import (
 
 // Executor runs a batch against Adminer. *adminer.Client implements it.
 type Executor interface {
-	Exec(ctx context.Context, batch string, limit int) ([]adminer.Block, error)
+	Exec(ctx context.Context, database, batch string, limit int) ([]adminer.Block, error)
 }
 
 // Result is a query result.
@@ -171,7 +171,7 @@ func (st *envState) run(ctx context.Context, sql string, fs gate.FuncSet, limit 
 		return nil, err
 	}
 	batch := st.wrap(stmt)
-	blocks, err := st.ex.Exec(ctx, batch, limit)
+	blocks, err := st.ex.Exec(ctx, st.env.Database, batch, limit)
 	if err != nil {
 		return nil, err
 	}

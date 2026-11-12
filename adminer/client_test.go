@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ func fixture(t *testing.T, name string) []byte {
 
 type recorded struct {
 	method string
+	query  url.Values
 	form   map[string]string
 }
 
@@ -49,7 +51,7 @@ type fakeAdminer struct {
 func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	rec := recorded{method: r.Method, form: map[string]string{}}
+	rec := recorded{method: r.Method, query: r.URL.Query(), form: map[string]string{}}
 	if r.Method == http.MethodPost {
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			if err := r.ParseForm(); err != nil {
@@ -132,7 +134,7 @@ func TestExecLogsInThenRuns(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"ok.html"}}
 	c, _ := newTestClient(t, f)
 	batch := "SELECT 1; SELECT 'a;b'"
-	blocks, err := c.Exec(context.Background(), batch, 0)
+	blocks, err := c.Exec(context.Background(), "glchat", batch, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +173,7 @@ func TestExecLogsInThenRuns(t *testing.T) {
 func TestExecReloginOnceOnExpiredSession(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"login.html", "ok.html"}}
 	c, _ := newTestClient(t, f)
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
 		t.Fatal(err)
 	}
 	if f.logins != 2 {
@@ -182,7 +184,7 @@ func TestExecReloginOnceOnExpiredSession(t *testing.T) {
 func TestExecFailsAfterSecondLoginPage(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"login.html"}}
 	c, _ := newTestClient(t, f)
-	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	_, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -203,7 +205,7 @@ func TestExecFailsAfterSecondLoginPage(t *testing.T) {
 func TestLoginFailureNoRetry(t *testing.T) {
 	f := &fakeAdminer{loginPage: "login_failed.html", batchPages: []string{"ok.html"}}
 	c, _ := newTestClient(t, f)
-	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	_, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if !errors.Is(err, ErrLogin) {
 		t.Fatalf("err = %v, want ErrLogin", err)
 	}
@@ -229,7 +231,7 @@ func TestLoginFailureNoRetry(t *testing.T) {
 func TestExecRetriesOnceOnBadToken(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"bad_token.html", "ok.html"}}
 	c, _ := newTestClient(t, f)
-	blocks, err := c.Exec(context.Background(), "SELECT 1", 0)
+	blocks, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +264,7 @@ func TestExecRetriesOnceOnBadToken(t *testing.T) {
 func TestExecBadTokenTwiceFails(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"bad_token.html"}}
 	c, _ := newTestClient(t, f)
-	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	_, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if err == nil || !strings.Contains(err.Error(), "staging") {
 		t.Fatalf("err = %v", err)
 	}
@@ -274,10 +276,10 @@ func TestExecBadTokenTwiceFails(t *testing.T) {
 func TestLimitField(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"ok.html"}}
 	c, _ := newTestClient(t, f)
-	if _, err := c.Exec(context.Background(), "SELECT 1", 101); err != nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 101); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.batches[0].form["limit"]; got != "101" {
@@ -295,7 +297,7 @@ func TestUnreachable(t *testing.T) {
 	f := &fakeAdminer{batchPages: []string{"ok.html"}}
 	c, srv := newTestClient(t, f)
 	srv.Close()
-	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	_, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if err == nil || !strings.Contains(err.Error(), "staging") {
 		t.Fatalf("err = %v", err)
 	}
@@ -315,7 +317,7 @@ func TestUnexpectedPagesFail(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeAdminer{batchPages: []string{tc.page}}
 			c, _ := newTestClient(t, f)
-			blocks, err := c.Exec(context.Background(), "SELECT 1", 0)
+			blocks, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 			if err == nil {
 				t.Fatalf("expected error, got blocks %v", blocks)
 			}
@@ -331,11 +333,11 @@ func TestLoginFailureLatchedForCooldown(t *testing.T) {
 	c, _ := newTestClient(t, f)
 	now := time.Now()
 	c.now = func() time.Time { return now }
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); !errors.Is(err, ErrLogin) {
 		t.Fatalf("err = %v", err)
 	}
 	now = now.Add(30 * time.Second)
-	_, err := c.Exec(context.Background(), "SELECT 1", 0)
+	_, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0)
 	if !errors.Is(err, ErrLogin) || !strings.Contains(err.Error(), "staging") || !strings.Contains(err.Error(), "cooldown") {
 		t.Fatalf("err = %v", err)
 	}
@@ -346,7 +348,7 @@ func TestLoginFailureLatchedForCooldown(t *testing.T) {
 	f.mu.Lock()
 	f.loginPage = ""
 	f.mu.Unlock()
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
 		t.Fatalf("after cooldown: %v", err)
 	}
 	if f.logins != 2 {
@@ -361,13 +363,13 @@ func stuckClient(t *testing.T) (*Client, *fakeAdminer) {
 	t.Helper()
 	f := &fakeAdminer{batchPages: []string{"ok.html", "bad_token.html", "ok.html"}}
 	c, _ := newTestClient(t, f)
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
 		t.Fatal(err)
 	}
 	f.mu.Lock()
 	f.failGets = 1
 	f.mu.Unlock()
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); err == nil {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err == nil {
 		t.Fatal("token refetch should have failed")
 	}
 	f.mu.Lock()
@@ -382,7 +384,7 @@ func stuckClient(t *testing.T) (*Client, *fakeAdminer) {
 func TestExecRecoversWhenTokenFetchFindsLoginPage(t *testing.T) {
 	c, f := stuckClient(t)
 	for i := range 3 {
-		if _, err := c.Exec(context.Background(), "SELECT 1", 0); err != nil {
+		if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
 			t.Fatalf("Exec %d: %v", i, err)
 		}
 	}
@@ -396,13 +398,70 @@ func TestExecRecoveryLoginFailureNotRetried(t *testing.T) {
 	f.mu.Lock()
 	f.loginPage = "login_failed.html"
 	f.mu.Unlock()
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); !errors.Is(err, ErrLogin) {
 		t.Fatalf("err = %v, want ErrLogin", err)
 	}
-	if _, err := c.Exec(context.Background(), "SELECT 1", 0); !errors.Is(err, ErrLogin) || !strings.Contains(err.Error(), "cooldown") {
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); !errors.Is(err, ErrLogin) || !strings.Contains(err.Error(), "cooldown") {
 		t.Fatalf("second err = %v, want latched ErrLogin", err)
 	}
 	if f.logins != 2 {
 		t.Errorf("logins = %d, want 2 (one recovery login, never retried)", f.logins)
+	}
+}
+
+func TestExecUsesRequestedDatabaseWithOneLogin(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}}
+	c, _ := newTestClient(t, f)
+	for _, db := range []string{"glchat", "postgres", "glchat"} {
+		if _, err := c.Exec(context.Background(), db, "SELECT 1", 0); err != nil {
+			t.Fatalf("Exec(%s): %v", db, err)
+		}
+	}
+	if f.logins != 1 {
+		t.Errorf("logins = %d, want 1 (one session for all databases)", f.logins)
+	}
+	if got := f.reqs[0].form["auth[db]"]; got != "glchat" {
+		t.Errorf("login auth[db] = %q, want the default database glchat", got)
+	}
+	if len(f.batches) != 3 {
+		t.Fatalf("batch posts = %d, want 3", len(f.batches))
+	}
+	for i, want := range []string{"glchat", "postgres", "glchat"} {
+		q := f.batches[i].query
+		if got := q.Get("db"); got != want {
+			t.Errorf("batch %d db = %q, want %q", i, got, want)
+		}
+		if q.Get("pgsql") != "database" || q.Get("username") != "postgres" || q.Get("ns") != "public" || !q.Has("sql") {
+			t.Errorf("batch %d query = %v", i, q)
+		}
+	}
+}
+
+func TestExecTokenFetchUsesRequestedDatabase(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}}
+	c, _ := newTestClient(t, f)
+	if _, err := c.Exec(context.Background(), "postgres", "SELECT 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	var gets []url.Values
+	for _, r := range f.reqs {
+		if r.method == http.MethodGet && r.query.Has("sql") { // skip the login redirect
+			gets = append(gets, r.query)
+		}
+	}
+	if len(gets) != 1 || gets[0].Get("db") != "postgres" {
+		t.Fatalf("token GETs = %v, want one with db=postgres", gets)
+	}
+}
+
+func TestExecRejectsEmptyDatabase(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}}
+	c, _ := newTestClient(t, f)
+	_, err := c.Exec(context.Background(), "", "SELECT 1", 0)
+	if err == nil || !strings.Contains(err.Error(), "staging") || !strings.Contains(err.Error(), "database") {
+		t.Fatalf("err = %v, want an error naming the environment and the database", err)
+	}
+	if len(f.reqs) != 0 {
+		t.Errorf("requests sent: %d, want 0", len(f.reqs))
 	}
 }

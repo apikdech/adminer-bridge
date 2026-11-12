@@ -135,7 +135,7 @@ func TestITLayer3(t *testing.T) {
 		t.Fatal(err)
 	}
 	batch := gate.Wrap("CREATE TABLE zz_it_probe(i int)", gate.Timeouts{Statement: 15 * time.Second, Lock: 2 * time.Second})
-	blocks, err := client.Exec(ctx(t), batch, 0)
+	blocks, err := client.Exec(ctx(t), cfg.Environments[envLocal].Database, batch, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

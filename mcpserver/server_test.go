@@ -19,7 +19,7 @@ import (
 // statement back as a one-row table.
 type fakeExec struct{}
 
-func (fakeExec) Exec(_ context.Context, batch string, _ int) ([]adminer.Block, error) {
+func (fakeExec) Exec(_ context.Context, _, batch string, _ int) ([]adminer.Block, error) {
 	parts := strings.Split(batch, ";\n")
 	stmt := parts[4]
 	blocks := make([]adminer.Block, 0, 6)
