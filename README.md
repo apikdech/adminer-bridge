@@ -1,6 +1,6 @@
 # adminer-bridge
 
-adminer-bridge runs read-only SQL against Postgres through an Adminer web page. It is an MCP server for Claude Code, and it also has a CLI. It is for developers who can reach a database only through Adminer.
+adminer-bridge runs read-only SQL against Postgres through an Adminer web page. It is an MCP server for clients such as Claude Code, Codex, and OpenCode. It also has a CLI. It is for developers who can reach a database only through Adminer.
 
 ## Prerequisites
 
@@ -18,19 +18,21 @@ The command creates the `adminer-bridge` binary in the repository root.
 
 ## Configure
 
+This README uses the term **password variable** for the environment variable that holds the password of one environment. The `password_env` field in the config gives its name.
+
 1. Copy `config.example.yaml` to `~/.config/adminer-bridge/config.yaml`.
-2. Edit the `local` environment, and add more environments if needed (the file has a commented `staging` example).
-3. Set the password in the environment variable that `password_env` names.
+2. Edit the `local` environment. The file also has a commented `staging` example.
+3. Set the password variable of each environment in your shell.
 
-The default config path is `~/.config/adminer-bridge/config.yaml`. Use the `--config` flag or the `ADMINER_BRIDGE_CONFIG` variable to change it.
+The default config path is `~/.config/adminer-bridge/config.yaml`. To use a different path, use the `--config` flag or the `ADMINER_BRIDGE_CONFIG` variable.
 
-> **Caution:** Never put a password in the config file. The config file only names the environment variable.
+> **Caution:** Never put a password in the config file. The config file only gives the name of the password variable.
 
 | Field | Meaning | Default |
 |---|---|---|
 | `url` | Adminer base URL | required |
 | `server`, `username`, `database` | Login values for Adminer | required |
-| `password_env` | Name of the variable that holds the password | required |
+| `password_env` | Name of the password variable | required |
 | `schema` | Default schema | `public` |
 | `statement_timeout` | Maximum run time of one statement | `15s` |
 | `lock_timeout` | Maximum wait for a lock | `2s` |
@@ -40,13 +42,141 @@ The default config path is `~/.config/adminer-bridge/config.yaml`. Use the `--co
 
 The bridge runs one query at a time for each environment. Other calls wait.
 
-## Register with Claude Code
+## Try the local environment first
+
+Test with the `local` environment before you add staging.
+
+1. Build the binary. See [Build](#build).
+2. Create the config directory:
+
+   ```bash
+   mkdir -p ~/.config/adminer-bridge
+   ```
+
+3. Copy the example config. It contains only the `local` environment:
+
+   ```bash
+   cp config.example.yaml ~/.config/adminer-bridge/config.yaml
+   ```
+
+4. Set the local password variable:
+
+   ```bash
+   export ADMINER_LOCAL_PASSWORD=$(docker inspect glchat-be-database-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^POSTGRES_PASSWORD=//p')
+   ```
+
+5. Run a query with the CLI:
+
+   ```bash
+   ./adminer-bridge query --env local "select current_user, version()"
+   ```
+
+   The CLI prints one row. This shows that the login and the safety layers work. On the local database, stderr also shows a superuser warning. This is normal.
+
+6. Register the MCP server with your client. See [Register with an MCP client](#register-with-an-mcp-client).
+7. In the client, ask the model to call `list_environments`.
+
+## Add staging later
+
+> **Caution:** The server reads the password variable of every environment in the config when it starts. If one password variable is not set, the server does not start, and no environment works. Add an environment to the config only when you can set its password variable.
+
+1. Get a staging login. If you can, ask for a dedicated read-only role.
+2. Find the Adminer version on staging. The version shows at the bottom of the Adminer login page.
+
+   The bridge reads the HTML of Adminer 5.4.1. If staging uses a different version, test with care.
+
+3. Copy the commented `staging` example from `config.example.yaml` into `~/.config/adminer-bridge/config.yaml`.
+4. Change the values of the `staging` entry to your staging login. Keep `password_env: ADMINER_STAGING_PASSWORD`.
+5. Set the staging password variable:
+
+   ```bash
+   export ADMINER_STAGING_PASSWORD='...'
+   ```
+
+   > **Caution:** If the next step fails with a login error, do not try again many times. Adminer blocks your IP address after too many failed logins. Fix the config or the password first.
+
+6. Run a query on staging with the CLI:
+
+   ```bash
+   ./adminer-bridge query --env staging "select 1"
+   ```
+
+   The CLI prints one row.
+
+7. Add `ADMINER_STAGING_PASSWORD` to your MCP client config. Each client section below shows where.
+8. Restart the MCP client.
+
+## Register with an MCP client
+
+The server gives four tools: `list_environments`, `query`, `list_tables`, and `describe_table`.
+
+The server reads passwords from the password variables. Each client passes these variables to the server. In each client config, use the absolute path of the binary.
+
+### Claude Code
+
+Run this command:
 
 ```bash
 claude mcp add adminer-bridge -e ADMINER_LOCAL_PASSWORD=... -- ~/Other/ok/adminer-bridge/adminer-bridge serve
 ```
 
-The server provides four tools: `list_environments`, `query`, `list_tables`, and `describe_table`.
+For staging, also add `-e ADMINER_STAGING_PASSWORD=...` to the command.
+
+### Codex
+
+1. Add this entry to `~/.codex/config.toml`:
+
+   ```toml
+   [mcp_servers.adminer-bridge]
+   command = "~/Other/ok/adminer-bridge/adminer-bridge"
+   args = ["serve"]
+   # Codex copies these variables from the shell that starts it.
+   # For staging, add "ADMINER_STAGING_PASSWORD" to this list.
+   env_vars = ["ADMINER_LOCAL_PASSWORD"]
+   ```
+
+2. Set the password variables in your shell.
+3. Start `codex` from the same shell.
+4. To see the configured servers, run `codex mcp list`.
+
+With `env_vars`, the passwords do not go into `config.toml`.
+
+> **Caution:** The `codex mcp add --env` command writes the password into `config.toml` as plain text. Use it only if you accept this risk.
+
+```bash
+codex mcp add adminer-bridge --env ADMINER_LOCAL_PASSWORD=... -- ~/Other/ok/adminer-bridge/adminer-bridge serve
+```
+
+### OpenCode
+
+1. Add this entry to `~/.config/opencode/opencode.json`. For one project only, use `opencode.json` in the project root.
+
+   ```jsonc
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "mcp": {
+       "adminer-bridge": {
+         "type": "local",
+         "command": ["~/Other/ok/adminer-bridge/adminer-bridge", "serve"],
+         "enabled": true,
+         // {env:NAME} copies the variable from the shell that starts OpenCode.
+         // For staging, add "ADMINER_STAGING_PASSWORD": "{env:ADMINER_STAGING_PASSWORD}".
+         "environment": {
+           "ADMINER_LOCAL_PASSWORD": "{env:ADMINER_LOCAL_PASSWORD}",
+           "ADMINER_STAGING_PASSWORD": "{env:ADMINER_STAGING_PASSWORD}",
+         },
+         // Keep this longer than the 30s HTTP timeout of the bridge.
+         // The bridge then reports a slow query as its own error.
+         "timeout": 45000
+       }
+     }
+   }
+   ```
+
+2. Set the password variables in your shell.
+3. Start `opencode` from the same shell.
+
+With `{env:NAME}`, the passwords do not go into `opencode.json`. If a variable is not set, OpenCode gives an empty value, and the server does not start.
 
 ## Use the CLI
 
@@ -67,7 +197,7 @@ All three layers always apply. The bridge sends no SQL to Adminer without them, 
 
 ## Residual risks
 
-- A read-only transaction does not stop all side effects. Functions in `pg_catalog` are checked, but other paths exist.
+- A read-only transaction does not stop all side effects. The gate checks functions in `pg_catalog`, but other paths exist.
 - The gate does not check functions that the parser does not show as function calls:
   - attribute notation (`t.my_func` calls `my_func(t)`)
   - user-defined operators
