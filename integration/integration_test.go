@@ -34,6 +34,7 @@ const testConfig = `environments:
     server: database
     username: postgres
     database: glchat
+    databases: [glchat, postgres]
     schema: public
     password_env: ADMINER_LOCAL_PASSWORD
   local_stmt1s:
@@ -246,5 +247,38 @@ func TestITDescribeTable(t *testing.T) {
 	}
 	if desc.Columns == nil || len(desc.Columns.Rows) == 0 {
 		t.Errorf("describe %s returned no columns", name)
+	}
+}
+
+// TestITDatabases uses the one shared login of envLocal for two databases.
+// stackframe exists on the server but is not on the allowlist.
+func TestITDatabases(t *testing.T) {
+	b := setup(t)
+	for _, tc := range []struct{ db, want string }{{"", "glchat"}, {"postgres", "postgres"}, {"glchat", "glchat"}} {
+		res, err := b.Query(ctx(t), envLocal, tc.db, "select current_database()", 0)
+		if err != nil {
+			t.Fatalf("database %q: %v", tc.db, err)
+		}
+		if len(res.Rows) != 1 || res.Rows[0][0] == nil || *res.Rows[0][0] != tc.want {
+			t.Errorf("database %q: rows = %v, want %s", tc.db, res.Rows, tc.want)
+		}
+		if res.Database != tc.want {
+			t.Errorf("database %q: Result.Database = %q, want %s", tc.db, res.Database, tc.want)
+		}
+	}
+	// The bridge rejects stackframe before it sends anything, so the error
+	// is the bare allowlist error, not a wrapped Adminer error.
+	_, err := b.Query(ctx(t), envLocal, "stackframe", "select current_database()", 0)
+	want := `database "stackframe" is not allowed for environment "local"; allowed: glchat, postgres`
+	if err == nil || err.Error() != want {
+		t.Fatalf("stackframe: err = %v, want %q", err, want)
+	}
+	for _, e := range b.ListEnvironments() {
+		if e.Name != envLocal {
+			continue
+		}
+		if len(e.Databases) != 2 || !e.Databases[0].Connected || !e.Databases[1].Connected {
+			t.Errorf("databases = %+v, want glchat and postgres connected", e.Databases)
+		}
 	}
 }
