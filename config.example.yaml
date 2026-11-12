@@ -6,7 +6,9 @@ environments:
     url: http://localhost:8080/      # Adminer base URL
     server: database                 # server name as Adminer knows it
     username: postgres
-    database: glchat
+    database: glchat                 # default database; the login uses it
+    # databases: [glchat, postgres]  # allowed databases (optional, default: [database])
+    #                                # must include database; one login covers all
     schema: public                   # default schema (optional, default: public)
     password_env: ADMINER_LOCAL_PASSWORD
     # statement_timeout: 15s         # default 15s
@@ -18,4 +20,5 @@ environments:
   #   server: staging-db.internal
   #   username: readonly_user
   #   database: app
+  #   databases: [app, app_dev]
   #   password_env: ADMINER_STAGING_PASSWORD

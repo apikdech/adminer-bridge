@@ -31,7 +31,9 @@ The default config path is `~/.config/adminer-bridge/config.yaml`. To use a diff
 | Field | Meaning | Default |
 |---|---|---|
 | `url` | Adminer base URL | required |
-| `server`, `username`, `database` | Login values for Adminer | required |
+| `server`, `username` | Login values for Adminer | required |
+| `database` | Default database. The login uses it. | required |
+| `databases` | Allowed databases. See [Use more than one database](#use-more-than-one-database). | `[database]` |
 | `password_env` | Name of the password variable | required |
 | `schema` | Default schema | `public` |
 | `statement_timeout` | Maximum run time of one statement | `15s` |
@@ -40,7 +42,33 @@ The default config path is `~/.config/adminer-bridge/config.yaml`. To use a diff
 
 `statement_timeout` and `lock_timeout` must be at least `1ms`. `http_timeout` must be greater than `statement_timeout`.
 
-The bridge runs one query at a time for each environment. Other calls wait.
+The bridge runs one query at a time for each environment, for all its databases together. Other calls wait.
+
+## Use more than one database
+
+One Adminer login can reach more than one database on the same server. For example: `staging`, `dev`, and `dev2`. Use the `databases` field to select the databases that a call can use. You do not need one environment for each database.
+
+1. Add the `databases` list to the environment:
+
+   ```yaml
+   environments:
+     staging:
+       # url, server, username, password_env as before
+       database: staging                  # default database
+       databases: [staging, dev, dev2]    # allowed databases
+   ```
+
+2. Make sure that the list includes the value of `database`. If it does not, the config does not load.
+3. Make sure that each entry is a database name, and that no name occurs two times.
+
+These rules apply:
+
+- If you do not set `databases`, the only allowed database is `database`.
+- One login covers all allowed databases of the environment. The bridge changes only the database in the Adminer URL.
+- A call without a database uses the default database.
+- The name must match exactly. The match is case-sensitive.
+- The bridge rejects a database that is not in the list. It rejects it before it sends anything to Adminer. The error gives the allowed databases.
+- On the first call to each database, the bridge reads the function list and checks the login role in that database.
 
 ## Try the local environment first
 
@@ -76,6 +104,8 @@ Test with the `local` environment before you add staging.
 6. Register the MCP server with your client. See [Register with an MCP client](#register-with-an-mcp-client).
 7. In the client, ask the model to call `list_environments`.
 
+   The result shows each environment with its default database and its allowed databases.
+
 ## Add staging later
 
 > **Caution:** The server reads the password variable of every environment in the config when it starts. If one password variable is not set, the server does not start, and no environment works. Add an environment to the config only when you can set its password variable.
@@ -109,6 +139,10 @@ Test with the `local` environment before you add staging.
 ## Register with an MCP client
 
 The server gives four tools: `list_environments`, `query`, `list_tables`, and `describe_table`.
+
+- `list_environments` gives each environment with its URL, default schema, default database, and allowed databases. For each allowed database, it shows if the bridge is connected, and the role facts and warnings.
+- `query`, `list_tables`, and `describe_table` have an optional `database` parameter. If you do not give it, the tool uses the default database. The value must be an allowed database of the environment.
+- Each result contains a `database` field. It shows the database that gave the result.
 
 The server reads passwords from the password variables. Each client passes these variables to the server. In each client config, use the absolute path of the binary.
 
@@ -183,7 +217,10 @@ With `{env:NAME}`, the passwords do not go into `opencode.json`. If a variable i
 ```bash
 ./adminer-bridge query --env local "select 1 as a"
 ./adminer-bridge query --env local --max-rows 10 --json "select * from users"
+./adminer-bridge query --env local --db postgres "select current_database()"
 ```
+
+To use a database other than the default database, use `--db NAME`. The database must be an allowed database of the environment.
 
 The default row limit is 100. The maximum is 1000. If the result is cut, the output says so. The CLI prints `NULL` for SQL null values. The JSON output uses `null`.
 
@@ -192,7 +229,7 @@ The default row limit is 100. The maximum is 1000. If the result is cut, the out
 All three layers always apply. The bridge sends no SQL to Adminer without them, including its own catalog queries.
 
 1. **Parser.** The bridge parses the SQL with the real Postgres parser. It accepts one `SELECT` or `EXPLAIN` statement. It rejects `EXPLAIN ANALYZE`, `SELECT INTO`, locking clauses, and data-changing statements anywhere in the tree. It also rejects `$1`-style parameters.
-2. **Functions.** The bridge accepts only functions in `pg_catalog`. It sends each function call as `pg_catalog.<name>`, so Postgres cannot pick a function with the same name from another schema. It also rejects a blocklist of dangerous names, for example `pg_sleep`, `set_config`, `pg_advisory_*`, `pg_read_file`, `lo_*`, `brin_*`, `pg_restore_*`, and functions that run SQL text such as `query_to_xml`, `ts_stat`, and `ts_rewrite`. The bridge reads the `pg_catalog` function list on the first connection. Until it has the list, it rejects all function calls.
+2. **Functions.** The bridge accepts only functions in `pg_catalog`. It sends each function call as `pg_catalog.<name>`, so Postgres cannot pick a function with the same name from another schema. It also rejects a blocklist of dangerous names, for example `pg_sleep`, `set_config`, `pg_advisory_*`, `pg_read_file`, `lo_*`, `brin_*`, `pg_restore_*`, and functions that run SQL text such as `query_to_xml`, `ts_stat`, and `ts_rewrite`. The bridge reads the `pg_catalog` function list on the first connection to each database. Until it has the list, it rejects all function calls.
 3. **Read-only transaction.** The bridge sends the deparsed statement, not your text. The statement runs in `BEGIN TRANSACTION READ ONLY` with local timeouts, and ends with `ROLLBACK`. Postgres itself refuses writes.
 
 ## Residual risks
@@ -205,7 +242,7 @@ All three layers always apply. The bridge sends no SQL to Adminer without them, 
 - The read-only transaction is the backstop for these paths. It does not stop side effects of functions that do not write to the database.
 - Adminer runs a hidden `EXPLAIN` for each statement that starts with `SELECT`. It runs it on a second database connection, after the statement and before the `ROLLBACK`. That connection is outside the read-only transaction and has no statement or lock timeouts. `EXPLAIN` without `ANALYZE` only plans the statement and does not run it. But planning takes table locks: if a migration is waiting for a lock, the plan can wait behind it while the bridge's transaction stays open. In the worst case, the migration waits until `idle_in_transaction_session_timeout` (the same as `statement_timeout`, 15s by default) ends the bridge's transaction. The bridge cannot turn this `EXPLAIN` off, because the Adminer option that does so also removes the statement echoes that the bridge checks.
 - **The real fix is a dedicated read-only database role.** Use one when you can.
-- On the first connection, the bridge checks the login role. It warns if the role is a superuser or if risky extensions or untrusted languages exist. The warnings appear in `list_environments`. The check only warns. It does not refuse to connect.
+- On the first connection to each database, the bridge checks the login role. It warns if the role is a superuser or if risky extensions or untrusted languages exist. The warnings appear in `list_environments`, for each database. The check only warns. It does not refuse to connect.
 
 ## Adminer login throttling
 
@@ -225,7 +262,7 @@ Run the unit tests:
 go vet ./... && go test ./...
 ```
 
-The integration tests need a running Adminer. They skip unless `ADMINER_BRIDGE_IT=1` is set. They use the local environment from the example config and one scratch table, `zz_it_lock_probe`, in the database container.
+The integration tests need a running Adminer. They skip unless `ADMINER_BRIDGE_IT=1` is set. They use the local environment with the allowed databases `glchat` and `postgres`, and one scratch table, `zz_it_lock_probe`, in the database container. A test also checks that the bridge rejects `stackframe`, a database that is not in the list.
 
 ```bash
 ADMINER_BRIDGE_IT=1 ADMINER_LOCAL_PASSWORD=... go test ./integration/ -v -count=1
