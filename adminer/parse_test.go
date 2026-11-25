@@ -182,3 +182,46 @@ func TestLimitFixtureStillTable(t *testing.T) {
 		t.Errorf("block=%+v", blocks[4])
 	}
 }
+
+// Adminer 6.3.0 wraps the result table in a form under #content (5.4.1 did
+// not). Shape captured from the live staging Adminer for SELECT 1 AS a, 'x' AS b.
+func TestParsePageAdminer6ResultInForm(t *testing.T) {
+	page := `<!DOCTYPE html><html><body class=' adminer'><div id='content'>
+<h2>SQL command</h2>
+<pre id='sql-1'><code class='jush-pgsql'>SELECT 1 AS a, &#039;x&#039; AS b</code></pre>
+<form method='post'>
+<div class='scrollable'>
+<table class='nowrap odds'>
+<thead><tr><th title='int4'>a<th title='text'>b<tbody>
+<tr><td class='number'>1<td>x</table>
+</div>
+<p class='sql-footer'>1 row <span class='time'>(0.001 s)</span></p>
+<input type='hidden' name='token' value='302439:884800'>
+</form>
+<div id='explain-1' class='hidden explain'>
+<div class='scrollable'>
+<table class='nowrap odds'>
+<thead><tr><th title='text'>QUERY PLAN<tbody>
+<tr><td>Result  (cost=0.00..0.01 rows=1 width=36)</table>
+</div>
+</div>
+<form method="post" enctype="multipart/form-data" id="form"><input type='hidden' name='token' value='747982:161001'></form>
+</div></body></html>`
+	kind, blocks, token, _, err := ParsePage([]byte(page))
+	if err != nil || kind != PageSQL {
+		t.Fatalf("kind=%v err=%v", kind, err)
+	}
+	if len(blocks) != 1 || blocks[0].Kind != KindTable {
+		t.Fatalf("blocks = %+v", blocks)
+	}
+	b := blocks[0]
+	if got := strings.Join(b.Columns, ","); got != "a,b" {
+		t.Errorf("columns = %q, want a,b", got)
+	}
+	if len(b.Rows) != 1 || *b.Rows[0][0] != "1" || *b.Rows[0][1] != "x" {
+		t.Errorf("rows = %+v, want [[1 x]] (explain table must be ignored)", b.Rows)
+	}
+	if token != "747982:161001" {
+		t.Errorf("token = %q, want the query form's token", token)
+	}
+}

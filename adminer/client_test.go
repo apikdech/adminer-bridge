@@ -48,6 +48,7 @@ type fakeAdminer struct {
 	failGets   int               // the next failGets GETs answer 502 (no SQL page)
 	dbPages    map[string]string // fixture for any request whose db= is a key (Adminer cannot open that database)
 	strikes    int               // requests Adminer counts as failed logins (add_invalid_login)
+	loginToken string            // Adminer 6: login form carries this CSRF token; a login POST without it is silently refused
 	pwCleared  bool              // a database failure cleared the stored password; GETs show the login page until a login POST
 }
 
@@ -110,6 +111,11 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if rec.form["auth[password]"] != testPassword {
 			f.t.Errorf("login password wrong")
 		}
+		if f.loginToken != "" && rec.form["token"] != f.loginToken {
+			// Adminer 6: login page again, no error text.
+			serve("login.html")
+			return
+		}
 		if f.loginPage != "" {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
@@ -132,6 +138,10 @@ func (f *fakeAdminer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			serve(f.loginPage)
 		} else if f.loggedIn {
 			serve("sql_page.html")
+		} else if f.loginToken != "" {
+			page := strings.Replace(string(fixture(f.t, "login.html")), "<div></div>",
+				"<div><input type='hidden' name='token' value='"+f.loginToken+"'></div>", 1)
+			serve("raw:200:" + page)
 		} else {
 			serve("login.html")
 		}
@@ -179,8 +189,8 @@ func TestExecLogsInThenRuns(t *testing.T) {
 			t.Errorf("request before first login carried username=: %q", e)
 		}
 	}
-	if f.events[0] != "login" {
-		t.Errorf("first request = %q, want login", f.events[0])
+	if f.events[0] != "GET " {
+		t.Errorf("first request = %q, want a bare GET of the login page", f.events[0])
 	}
 	_, _, wantTok, _, _ := ParsePage(fixture(t, "sql_page.html"))
 	b := f.batches[0].form
@@ -445,8 +455,13 @@ func TestExecUsesRequestedDatabaseWithOneLogin(t *testing.T) {
 	if f.logins != 1 {
 		t.Errorf("logins = %d, want 1 (one session for all databases)", f.logins)
 	}
-	if got := f.reqs[0].form["auth[db]"]; got != "glchat" {
-		t.Errorf("login auth[db] = %q, want the default database glchat", got)
+	for _, r := range f.reqs {
+		if _, ok := r.form["auth[password]"]; ok {
+			if got := r.form["auth[db]"]; got != "glchat" {
+				t.Errorf("login auth[db] = %q, want the default database glchat", got)
+			}
+			break
+		}
 	}
 	if len(f.batches) != 3 {
 		t.Fatalf("batch posts = %d, want 3", len(f.batches))
@@ -607,7 +622,8 @@ func TestExecNonDefaultDatabaseFailureLogsInDirectly(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := f.events[mark:]
-	if len(next) == 0 || next[0] != "login" {
+	// The login starts with a bare GET of the login page (for its token).
+	if len(next) < 2 || next[0] != "GET " || next[1] != "login" {
 		t.Errorf("requests after the failure = %q, want a login first", next)
 	}
 	if f.strikes != 1 {
@@ -627,5 +643,18 @@ func TestExecRejectsEmptyDatabase(t *testing.T) {
 	}
 	if len(f.reqs) != 0 {
 		t.Errorf("requests sent: %d, want 0", len(f.reqs))
+	}
+}
+
+// Adminer 6 puts a CSRF token in the login form and re-shows the login page,
+// without an error message, when the login POST does not echo it.
+func TestLoginEchoesAdminer6LoginToken(t *testing.T) {
+	f := &fakeAdminer{batchPages: []string{"ok.html"}, loginToken: "670228:48087"}
+	c, _ := newTestClient(t, f)
+	if _, err := c.Exec(context.Background(), "glchat", "SELECT 1", 0); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if f.logins != 1 {
+		t.Errorf("logins = %d, want 1", f.logins)
 	}
 }

@@ -15,6 +15,7 @@
 //     throttling) are div.error, not p.error.
 //   - Ordinary SELECTs are followed by a hidden div.explain holding another result
 //     table; it must be ignored.
+//   - Adminer 6.3.0 wraps the result's div.scrollable in a <form> under #content.
 //   - Table markup leaves th/td/tr unclosed; goquery (x/net/html) copes.
 //   - Cell values: SQL NULL is <td><i>NULL</i>; the string 'NULL' is plain text;
 //     the empty string is an empty td. Values are HTML-escaped, unicode is raw,
@@ -69,7 +70,8 @@ func ParsePage(page []byte) (kind PageKind, blocks []Block, token string, pageEr
 	if doc.Find(`input[name="auth[password]"]`).Length() > 0 {
 		kind = PageLogin
 	}
-	// The login form itself has no token; the page's language form does.
+	// Adminer 5.4.1: the login form itself has no token; the page's language form does.
+	// Adminer 6: the login form has one too, and the login POST must echo it.
 	token = attr(doc.Find(`form#form input[name=token]`).First(), "value")
 	if token == "" {
 		token = attr(doc.Find(`input[name=token]`).First(), "value")
@@ -111,8 +113,14 @@ func ParsePage(page []byte) (kind PageKind, blocks []Block, token string, pageEr
 			cur.Message = strings.TrimSpace(text(s))
 		case s.Is("p.message"):
 			cur.Message = strings.TrimSpace(text(s))
-		case s.Is("div.scrollable"):
-			if t := s.Find("table").First(); t.Length() > 0 {
+		case s.Is("div.scrollable"), s.Is("form") && s.ChildrenFiltered("div.scrollable").Length() > 0:
+			// Adminer 6 wraps the result's div.scrollable in a form; 5.4.1
+			// puts it directly under #content.
+			box := s
+			if s.Is("form") {
+				box = s.ChildrenFiltered("div.scrollable").First()
+			}
+			if t := box.Find("table").First(); t.Length() > 0 {
 				cur.Kind = KindTable
 				cur.Columns, cur.Rows = parseTable(t)
 			}
