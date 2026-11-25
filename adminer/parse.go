@@ -69,7 +69,8 @@ func ParsePage(page []byte) (kind PageKind, blocks []Block, token string, pageEr
 	if doc.Find(`input[name="auth[password]"]`).Length() > 0 {
 		kind = PageLogin
 	}
-	// The login form itself has no token; the page's language form does.
+	// Adminer 5.4.1: the login form itself has no token; the page's language form does.
+	// Adminer 6: the login form has one too, and the login POST must echo it.
 	token = attr(doc.Find(`form#form input[name=token]`).First(), "value")
 	if token == "" {
 		token = attr(doc.Find(`input[name=token]`).First(), "value")

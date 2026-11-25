@@ -167,6 +167,22 @@ func (c *Client) doLogin(ctx context.Context) error {
 		"auth[password]": {c.password},
 		"auth[db]":       {c.env.Database},
 	}
+	// Adminer 6 puts a CSRF token in the login form and silently re-shows the
+	// login page, with no error, when a login POST lacks it or the session
+	// cookie it is bound to. Adminer 5.4.1 had no token there. So GET the bare
+	// login page first (no username=, so Adminer's failed-login throttle does
+	// not count it) and echo the token back when there is one.
+	preReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.env.URL, nil)
+	if err != nil {
+		return fmt.Errorf("environment %q: %w", c.env.Name, err)
+	}
+	pre, err := c.do(preReq)
+	if err != nil {
+		return err
+	}
+	if pre.kind == PageLogin && pre.token != "" {
+		form.Set("token", pre.token)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.env.URL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return fmt.Errorf("environment %q: %w", c.env.Name, err)
