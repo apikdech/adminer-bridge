@@ -201,3 +201,38 @@ func TestResolveDatabaseWithoutList(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestLoadBackendDefaultsToAdminer(t *testing.T) {
+	c, err := Load(writeCfg(t, full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Environments["local"].Backend; got != BackendAdminer {
+		t.Fatalf("backend = %q, want %q", got, BackendAdminer)
+	}
+}
+
+func TestLoadBackendPgAdmin(t *testing.T) {
+	c, err := Load(writeCfg(t, `environments:
+  claudia-dev:
+    backend: pgadmin
+    url: https://pgadmin.example/
+    server: koi-dev
+    username: bot@example.com
+    database: glchat_dev
+    password_env: X_PW
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Environments["claudia-dev"].Backend; got != BackendPgAdmin {
+		t.Fatalf("backend = %q", got)
+	}
+}
+
+func TestLoadRejectsUnknownBackend(t *testing.T) {
+	_, err := Load(writeCfg(t, strings.Replace(full, "    url:", "    backend: mysql\n    url:", 1)))
+	if err == nil || !strings.Contains(err.Error(), `backend "mysql"`) {
+		t.Fatalf("err = %v", err)
+	}
+}

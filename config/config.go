@@ -12,9 +12,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Env describes one Adminer-backed Postgres environment.
+// Backends: the web tool an environment's queries go through.
+const (
+	BackendAdminer = "adminer"
+	BackendPgAdmin = "pgadmin"
+)
+
+// Env describes one Postgres environment behind Adminer or pgAdmin.
 type Env struct {
-	Name             string        // map key
+	Name string // map key
+	// Backend is "adminer" (default) or "pgadmin". For pgadmin, url is the
+	// pgAdmin base URL, server the name of the server in pgAdmin's tree,
+	// and username the pgAdmin login email.
+	Backend          string        `yaml:"backend"`
 	URL              string        `yaml:"url"`
 	Server           string        `yaml:"server"`
 	Username         string        `yaml:"username"`
@@ -53,6 +63,13 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("environment %q: empty definition", name)
 		}
 		e.Name = name
+		switch e.Backend {
+		case "":
+			e.Backend = BackendAdminer
+		case BackendAdminer, BackendPgAdmin:
+		default:
+			return nil, fmt.Errorf("environment %q: unknown backend %q; use %q or %q", name, e.Backend, BackendAdminer, BackendPgAdmin)
+		}
 		for _, r := range []struct{ field, val string }{
 			{"url", e.URL}, {"server", e.Server}, {"username", e.Username},
 			{"database", e.Database}, {"password_env", e.PasswordEnv},

@@ -76,6 +76,47 @@ These rules apply:
 - The bridge rejects a database that is not in the list. It rejects it before it sends anything to Adminer. The error gives the allowed databases.
 - On the first call to each database, the bridge reads the function list and checks the login role in that database.
 
+## Use pgAdmin instead of Adminer
+
+Some databases can be reached only through pgAdmin 4. Set `backend: pgadmin` on
+the environment. The bridge then logs in to pgAdmin and runs the queries in
+pgAdmin's query tool. The safety layers are the same.
+
+| Field | Meaning for `backend: pgadmin` |
+|---|---|
+| `url` | pgAdmin base URL |
+| `server` | Server name in the pgAdmin tree, for example `koi-dev`. pgAdmin must have its password saved. |
+| `username` | pgAdmin login email |
+| `password_env` | Name of the variable that holds the pgAdmin password |
+| `database`, `databases` | As for Adminer. Each database must be on that server. |
+
+```yaml
+environments:
+  claudia-dev:
+    backend: pgadmin
+    url: https://pgadmin.example.com/
+    server: koi-dev
+    username: bot@example.com
+    database: glchat_dev
+    password_env: PGADMIN_PASSWORD
+```
+
+How it works, and what is different from Adminer:
+
+- pgAdmin has no public API for SQL. The bridge uses the endpoints of the pgAdmin
+  web page. They were captured from pgAdmin 9.8 (`pgadmin/testdata/NOTES.md`). A
+  pgAdmin upgrade can change them.
+- pgAdmin returns only the last result of a batch. The bridge runs the read-only
+  wrapper one statement at a time on one query tool connection. Before your
+  statement it checks `transaction_read_only` and stops if it is not `on`. After
+  `BEGIN`, it always sends `ROLLBACK`, also after an error.
+- The bridge opens one query tool for each database and uses it again.
+- pgAdmin locks an account after a few failed logins. After a failed login the
+  bridge does not try again for 60 seconds. Check the email and password first.
+
+> **Caution:** Use a pgAdmin login and a database role for the bot, not a personal
+> account, when you can.
+
 ## Try the local environment first
 
 Test with the `local` environment before you add staging.

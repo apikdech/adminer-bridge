@@ -16,6 +16,7 @@ import (
 	"adminer-bridge/adminer"
 	"adminer-bridge/config"
 	"adminer-bridge/gate"
+	"adminer-bridge/pgadmin"
 )
 
 func testEnv() *config.Env {
@@ -933,5 +934,23 @@ func TestOtherErrorKeepsPreflight(t *testing.T) {
 	}
 	if n := countStmts(f, "pg_database", "db"); n != 1 {
 		t.Errorf("preflights = %d, want 1", n)
+	}
+}
+
+func TestNewPicksExecutorByBackend(t *testing.T) {
+	t.Setenv("X_PW", "pw")
+	cfg := &config.Config{Environments: map[string]*config.Env{
+		"a": {Name: "a", Backend: config.BackendAdminer, URL: "http://a/", Server: "s", Username: "u", Database: "d", PasswordEnv: "X_PW", HTTPTimeout: time.Second},
+		"p": {Name: "p", Backend: config.BackendPgAdmin, URL: "http://p/", Server: "s", Username: "u@example.com", Database: "d", PasswordEnv: "X_PW", HTTPTimeout: time.Second},
+	}}
+	b, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.envs["a"].ex.(*adminer.Client); !ok {
+		t.Errorf("adminer env executor = %T", b.envs["a"].ex)
+	}
+	if _, ok := b.envs["p"].ex.(*pgadmin.Client); !ok {
+		t.Errorf("pgadmin env executor = %T", b.envs["p"].ex)
 	}
 }
