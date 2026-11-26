@@ -16,6 +16,7 @@ import (
 	"adminer-bridge/adminer"
 	"adminer-bridge/config"
 	"adminer-bridge/gate"
+	"adminer-bridge/pgadmin"
 )
 
 // Executor runs a batch in one database through Adminer. *adminer.Client
@@ -107,12 +108,21 @@ type Bridge struct {
 	now  func() time.Time
 }
 
-// New builds a Bridge with real Adminer clients. No network traffic happens
-// until the first Query.
+// New builds a Bridge with a real Adminer or pgAdmin client for each
+// environment, by its backend. No network traffic happens until the first
+// Query.
 func New(cfg *config.Config) (*Bridge, error) {
 	ex := map[string]Executor{}
 	for name, env := range cfg.Environments {
-		c, err := adminer.NewClient(env)
+		var (
+			c   Executor
+			err error
+		)
+		if env.Backend == config.BackendPgAdmin {
+			c, err = pgadmin.NewClient(env)
+		} else {
+			c, err = adminer.NewClient(env)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("environment %q: %w", name, err)
 		}
