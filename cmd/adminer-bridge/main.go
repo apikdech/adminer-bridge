@@ -62,6 +62,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return fmt.Errorf("unknown subcommand %q", args[0])
 }
 
+// httpToken loads the secrets file (when given) and then reads the bearer
+// token, so the token can come from the secrets file.
+func httpToken(secretsPath, tokenEnv string) (string, error) {
+	if secretsPath != "" {
+		if err := secrets.Load(secretsPath); err != nil {
+			return "", err
+		}
+	}
+	return tokenFromEnv(tokenEnv)
+}
+
 // loadConfig loads the secrets file first (when given), so that the
 // password_env variables of the config can come from it.
 func loadConfig(cfgPath, secretsPath string) (*config.Config, error) {
@@ -107,11 +118,12 @@ func serve(args []string, stderr io.Writer) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("serve: unexpected argument %q", fs.Arg(0))
 	}
-	token, err := tokenFromEnv(*tokenEnv)
+	// Secrets first: the token variable may come from the secrets file too.
+	token, err := httpToken(*secretsPath, *tokenEnv)
 	if err != nil {
 		return err
 	}
-	b, err := loadBridge(*cfgPath, *secretsPath)
+	b, err := loadBridge(*cfgPath, "")
 	if err != nil {
 		return err
 	}
