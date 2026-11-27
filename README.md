@@ -2,7 +2,26 @@
 
 adminer-bridge runs read-only SQL against Postgres through an Adminer web page. It is an MCP server for clients such as Claude Code, Codex, and OpenCode. It also has a CLI. It is for developers who can reach a database only through Adminer.
 
-## Prerequisites
+## Install
+
+Download a release archive for your system from the GitHub releases page. The names have the form `adminer-bridge_<version>_<os>_<arch>.tar.gz`. `<os>` is `linux` or `darwin`. `<arch>` is `amd64` or `arm64`. Also download `SHA256SUMS`.
+
+Check the archive, then unpack it:
+
+```bash
+# Linux
+sha256sum -c --ignore-missing SHA256SUMS
+# macOS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+
+tar -xzf adminer-bridge_<version>_<os>_<arch>.tar.gz
+```
+
+Each check must print `OK` for your archive. The archive holds the `adminer-bridge` binary. Put it in a directory on your `PATH`.
+
+To build from source instead, see [Build](#build).
+
+## Prerequisites (build from source)
 
 - Go 1.27 or later.
 - A C compiler. The SQL parser (`pg_query_go`) uses cgo.
