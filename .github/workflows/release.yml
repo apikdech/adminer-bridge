@@ -9,12 +9,15 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+          cache: false
       - run: go test ./...
 
   build:
@@ -23,16 +26,19 @@ jobs:
       matrix:
         include:
           # The SQL parser (pg_query_go) needs cgo, so each target builds on a native runner.
-          - {os: linux, arch: amd64, runner: ubuntu-latest}
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
           - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
           - {os: darwin, arch: amd64, runner: macos-15-intel}
           - {os: darwin, arch: arm64, runner: macos-latest}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+          cache: false
       - name: Build archive
         env:
           CGO_ENABLED: '1'
@@ -41,7 +47,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
-          go build -trimpath -ldflags "-s -w" -o adminer-bridge ./cmd/adminer-bridge
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o adminer-bridge ./cmd/adminer-bridge
           tar -czf "adminer-bridge_${version}_${GOOS}_${GOARCH}.tar.gz" adminer-bridge
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -50,7 +56,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
