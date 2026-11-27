@@ -19,6 +19,8 @@ tar -xzf adminer-bridge_<version>_<os>_<arch>.tar.gz
 
 Each check must print `OK` for your archive. The archive holds the `adminer-bridge` binary. Put it in a directory on your `PATH`.
 
+The Linux binaries are built with cgo on Ubuntu 24.04 and need glibc 2.34 or later (for example Ubuntu 22.04 or later, or Debian 12 or later). They do not run on musl systems such as Alpine.
+
 To build from source instead, see [Build](#build).
 
 ## Prerequisites (build from source)
@@ -219,7 +221,7 @@ The server reads passwords from the password variables. Each client passes these
 Run this command:
 
 ```bash
-claude mcp add adminer-bridge -e ADMINER_LOCAL_PASSWORD=... -- ~/Other/ok/adminer-bridge/adminer-bridge serve
+claude mcp add adminer-bridge -e ADMINER_LOCAL_PASSWORD=... -- /usr/local/bin/adminer-bridge serve
 ```
 
 For staging, also add `-e ADMINER_STAGING_PASSWORD=...` to the command.
@@ -230,7 +232,7 @@ For staging, also add `-e ADMINER_STAGING_PASSWORD=...` to the command.
 
    ```toml
    [mcp_servers.adminer-bridge]
-   command = "~/Other/ok/adminer-bridge/adminer-bridge"
+   command = "/usr/local/bin/adminer-bridge"
    args = ["serve"]
    # Codex copies these variables from the shell that starts it.
    # For staging, add "ADMINER_STAGING_PASSWORD" to this list.
@@ -246,7 +248,7 @@ With `env_vars`, the passwords do not go into `config.toml`.
 > **Caution:** The `codex mcp add --env` command writes the password into `config.toml` as plain text. Use it only if you accept this risk.
 
 ```bash
-codex mcp add adminer-bridge --env ADMINER_LOCAL_PASSWORD=... -- ~/Other/ok/adminer-bridge/adminer-bridge serve
+codex mcp add adminer-bridge --env ADMINER_LOCAL_PASSWORD=... -- /usr/local/bin/adminer-bridge serve
 ```
 
 ### OpenCode
@@ -259,7 +261,7 @@ codex mcp add adminer-bridge --env ADMINER_LOCAL_PASSWORD=... -- ~/Other/ok/admi
      "mcp": {
        "adminer-bridge": {
          "type": "local",
-         "command": ["~/Other/ok/adminer-bridge/adminer-bridge", "serve"],
+         "command": ["/usr/local/bin/adminer-bridge", "serve"],
          "enabled": true,
          // {env:NAME} copies the variable from the shell that starts OpenCode.
          // For staging, add "ADMINER_STAGING_PASSWORD": "{env:ADMINER_STAGING_PASSWORD}".
