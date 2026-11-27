@@ -26,6 +26,8 @@ This README uses the term **password variable** for the environment variable tha
 
 The default config path is `~/.config/adminer-bridge/config.yaml`. To use a different path, use the `--config` flag or the `ADMINER_BRIDGE_CONFIG` variable.
 
+For `serve` and `query`, `--secrets <path>` loads a `KEY=VALUE` file (mode `chmod 600`) into the environment before the config. Use it for the `password_env` variables. A variable that is already set is not changed.
+
 > **Caution:** Never put a password in the config file. The config file only gives the name of the password variable.
 
 | Field | Meaning | Default |
@@ -266,7 +268,7 @@ Use HTTP mode when the MCP client runs in a container that must not hold secrets
 In HTTP mode, the bridge serves MCP over streamable HTTP at `/mcp`. All clients share one Adminer login and one query lock for each environment. `GET /healthz` returns `ok` and needs no token. All other paths return 404.
 
 ```text
-adminer-bridge serve --http ADDR [--config path] [--token-env NAME]
+adminer-bridge serve --http ADDR [--config path] [--secrets path] [--token-env NAME]
 adminer-bridge health [--url URL]
 ```
 

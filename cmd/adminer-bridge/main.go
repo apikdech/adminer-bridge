@@ -21,15 +21,16 @@ import (
 	"github.com/apikdech/adminer-bridge/bridge"
 	"github.com/apikdech/adminer-bridge/config"
 	"github.com/apikdech/adminer-bridge/mcpserver"
+	"github.com/apikdech/adminer-bridge/secrets"
 )
 
 var version = "dev"
 
 const usage = `usage:
-  adminer-bridge serve [--config path]
-  adminer-bridge serve --http ADDR [--config path] [--token-env NAME]
+  adminer-bridge serve [--config path] [--secrets path]
+  adminer-bridge serve --http ADDR [--config path] [--secrets path] [--token-env NAME]
   adminer-bridge health [--url URL]
-  adminer-bridge query [--config path] --env NAME [--db NAME] [--max-rows N] [--json] "SQL"
+  adminer-bridge query [--config path] [--secrets path] --env NAME [--db NAME] [--max-rows N] [--json] "SQL"
 `
 
 func main() {
@@ -61,11 +62,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return fmt.Errorf("unknown subcommand %q", args[0])
 }
 
-func loadBridge(path string) (*bridge.Bridge, error) {
-	if path == "" {
-		path = config.DefaultPath()
+// loadConfig loads the secrets file first (when given), so that the
+// password_env variables of the config can come from it.
+func loadConfig(cfgPath, secretsPath string) (*config.Config, error) {
+	if secretsPath != "" {
+		if err := secrets.Load(secretsPath); err != nil {
+			return nil, err
+		}
 	}
-	cfg, err := config.Load(path)
+	if cfgPath == "" {
+		cfgPath = config.DefaultPath()
+	}
+	return config.Load(cfgPath)
+}
+
+func loadBridge(cfgPath, secretsPath string) (*bridge.Bridge, error) {
+	cfg, err := loadConfig(cfgPath, secretsPath)
 	if err != nil {
 		return nil, err
 	}
@@ -76,13 +88,14 @@ func serve(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "config file (default: $ADMINER_BRIDGE_CONFIG or ~/.config/adminer-bridge/config.yaml)")
+	secretsPath := fs.String("secrets", "", "KEY=VALUE file (chmod 600) loaded into the environment before the config; variables already set win")
 	httpAddr := fs.String("http", "", "serve MCP over streamable HTTP at /mcp on this address (e.g. :8090) instead of stdio")
 	tokenEnv := fs.String("token-env", defaultTokenEnv, "with --http: environment variable that holds the bearer token (at least 32 characters)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *httpAddr == "" {
-		b, err := loadBridge(*cfgPath)
+		b, err := loadBridge(*cfgPath, *secretsPath)
 		if err != nil {
 			return err
 		}
@@ -98,7 +111,7 @@ func serve(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	b, err := loadBridge(*cfgPath)
+	b, err := loadBridge(*cfgPath, *secretsPath)
 	if err != nil {
 		return err
 	}
@@ -113,6 +126,7 @@ func query(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "config file")
+	secretsPath := fs.String("secrets", "", "KEY=VALUE file (chmod 600) loaded into the environment before the config")
 	env := fs.String("env", "", "environment name (required)")
 	db := fs.String("db", "", "database (default: the environment's default database; must be an allowed database)")
 	maxRows := fs.Int("max-rows", 0, "maximum rows (default 100, hard max 1000)")
@@ -133,7 +147,7 @@ func query(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stderr, usage)
 		return errors.New("query needs --env and exactly one SQL argument")
 	}
-	b, err := loadBridge(*cfgPath)
+	b, err := loadBridge(*cfgPath, *secretsPath)
 	if err != nil {
 		return err
 	}
