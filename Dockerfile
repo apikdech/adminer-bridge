@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage. cgo is required: pg_query_go compiles the Postgres parser.
-FROM golang:1.27-bookworm AS build
+FROM golang:1.27-bookworm@sha256:ce59b41415e2524ae99926fe1f37ce48ba8c194dcbd2a56a65436cdcefa2bd34 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,7 +14,7 @@ RUN CGO_ENABLED=1 go build -trimpath -tags netgo,osusergo \
       -o /out/adminer-bridge ./cmd/adminer-bridge
 
 # Runtime stage: CA certificates and tzdata only, no libc, no shell, uid 65532.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/adminer-bridge /adminer-bridge
 # Mount the config here (read-only). Passwords and the token come from
 # environment variables, never from the image.
