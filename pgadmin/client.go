@@ -34,8 +34,8 @@ import (
 	"sync"
 	"time"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/config"
 )
 
 // ErrLogin means pgAdmin rejected the login.

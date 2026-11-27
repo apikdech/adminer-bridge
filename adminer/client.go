@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/config"
 )
 
 // ErrLogin means Adminer rejected the login. It is never retried: Adminer

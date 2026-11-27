@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/bridge"
-	"adminer-bridge/config"
-	"adminer-bridge/gate"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/bridge"
+	"github.com/apikdech/adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/gate"
 )
 
 const (

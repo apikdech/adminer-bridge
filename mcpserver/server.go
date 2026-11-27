@@ -7,7 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"adminer-bridge/bridge"
+	"github.com/apikdech/adminer-bridge/bridge"
 )
 
 const readOnlyRules = "Read-only: send exactly one SELECT or EXPLAIN (no ANALYZE) per call. " +

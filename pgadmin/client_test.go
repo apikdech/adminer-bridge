@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/config"
 )
 
 // fakePgAdmin mimics the pgAdmin 9.8 endpoints the client uses. The JSON

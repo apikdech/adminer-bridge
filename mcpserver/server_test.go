@@ -10,9 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/bridge"
-	"adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/bridge"
+	"github.com/apikdech/adminer-bridge/config"
 )
 
 // fakeExec answers the bridge's init batches and echoes every other
