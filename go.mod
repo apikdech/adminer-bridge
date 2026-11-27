@@ -1,4 +1,4 @@
-module adminer-bridge
+module github.com/apikdech/adminer-bridge
 
 go 1.27.4
 

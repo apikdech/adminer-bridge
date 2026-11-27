@@ -16,10 +16,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/bridge"
-	"adminer-bridge/config"
-	"adminer-bridge/mcpserver"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/bridge"
+	"github.com/apikdech/adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/mcpserver"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef" // 32 characters

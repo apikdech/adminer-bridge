@@ -18,9 +18,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"adminer-bridge/bridge"
-	"adminer-bridge/config"
-	"adminer-bridge/mcpserver"
+	"github.com/apikdech/adminer-bridge/bridge"
+	"github.com/apikdech/adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/mcpserver"
 )
 
 var version = "dev"

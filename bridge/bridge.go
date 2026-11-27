@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"adminer-bridge/adminer"
-	"adminer-bridge/config"
-	"adminer-bridge/gate"
-	"adminer-bridge/pgadmin"
+	"github.com/apikdech/adminer-bridge/adminer"
+	"github.com/apikdech/adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/gate"
+	"github.com/apikdech/adminer-bridge/pgadmin"
 )
 
 // Executor runs a batch in one database through Adminer. *adminer.Client

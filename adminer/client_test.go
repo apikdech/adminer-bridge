@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"adminer-bridge/config"
+	"github.com/apikdech/adminer-bridge/config"
 )
 
 const testPassword = "s3cret-pw-value"
