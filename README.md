@@ -357,7 +357,7 @@ The MCP URL is `http://HOST:8090/mcp`. A generic client config has this shape:
   "mcpServers": {
     "adminer-bridge": {
       "type": "http",
-      "url": "http://10.88.0.20:8090/mcp",
+      "url": "http://HOST:8090/mcp",
       "headers": { "Authorization": "Bearer ${ADMINER_BRIDGE_TOKEN}" }
     }
   }
@@ -372,75 +372,46 @@ For Claude Code, run this command:
 claude mcp add --transport http adminer-bridge http://HOST:8090/mcp --header "Authorization: Bearer $TOKEN"
 ```
 
-### Run next to the the app VPN sidecar
+### Run behind a VPN container
 
-The staging Adminer is reachable only through the VPN. In `your docker-compose.yml`, the `vpn` service runs OpenVPN. The `app` service uses `network_mode: "service:vpn"` and listens on port 8080 in that network namespace. Run the bridge in the same namespace.
+When the Adminer host is reachable only through a VPN, run the bridge in the network namespace of the VPN container (`network_mode: "service:vpn"`), and let clients reach it on an internal Docker network only. A Compose sketch, with example addresses:
 
-The agent containers use a separate internal network, `agents_net`. The bridge listens only on the address of the `vpn` service in `agents_net`.
+```yaml
+networks:
+  agents_net:
+    internal: true          # clients on this network have no internet access
+    ipam:
+      config:
+        - subnet: 10.88.0.0/24
 
-1. Add the `agents_net` network to the top-level `networks` map:
+services:
+  vpn:
+    # your VPN client container
+    networks:
+      agents_net:
+        ipv4_address: 10.88.0.20
 
-   ```yaml
-   networks:
-     app_net:
-       ipam:
-         config:
-           - subnet: 10.87.0.0/24
-     agents_net:
-       internal: true
-       ipam:
-         config:
-           - subnet: 10.88.0.0/24
-   ```
+  adminer-bridge:
+    image: adminer-bridge:latest
+    restart: unless-stopped
+    network_mode: "service:vpn"
+    depends_on: { vpn: { condition: service_healthy } }
+    command: ["serve", "--http", "10.88.0.20:8090", "--config", "/etc/adminer-bridge/config.yaml"]
+    healthcheck:
+      test: ["CMD", "/adminer-bridge", "health", "--url", "http://10.88.0.20:8090/healthz"]
+    env_file: ./adminer-bridge.env   # ADMINER_BRIDGE_TOKEN and the password_env variables
+    volumes:
+      - ./adminer-bridge.yaml:/etc/adminer-bridge/config.yaml:ro
+    read_only: true
+    cap_drop: [ALL]
+```
 
-2. Connect the `vpn` service to both networks. This map form replaces the existing list form `networks: - app_net`.
+Clients on `agents_net` use `http://10.88.0.20:8090/mcp`.
 
-   ```yaml
-   vpn:
-     networks:
-       app_net: {}
-       agents_net:
-         ipv4_address: 10.88.0.20
-   ```
-
-3. Add the bridge service:
-
-   ```yaml
-   adminer-bridge:
-     image: adminer-bridge:latest   # or build: from this repo
-     restart: unless-stopped
-     network_mode: "service:vpn"    # staging Adminer is reachable only through the VPN
-     depends_on: { vpn: { condition: service_healthy } }
-     command: ["serve", "--http", "10.88.0.20:8090"]
-     healthcheck:
-       test: ["CMD", "/adminer-bridge", "health", "--url", "http://10.88.0.20:8090/healthz"]
-     env_file: ../adminer-bridge/secrets.env   # ADMINER_BRIDGE_TOKEN, ADMINER_STAGING_PASSWORD
-     volumes:
-       - ../adminer-bridge.yaml:/etc/adminer-bridge/config.yaml:ro
-     read_only: true
-     cap_drop: [ALL]
-   ```
-
-4. Connect each agent container to `agents_net` only:
-
-   ```yaml
-   debug-agent:
-     networks: [agents_net]
-   ```
-
-5. Configure the agent container to use `http://10.88.0.20:8090/mcp`.
-6. If `app` calls the bridge, configure it to use `http://10.88.0.20:8090/mcp`. `app` is in the same namespace, so it can reach this address.
-
-The reasons for this setup:
-
-- The bridge listens only on `10.88.0.20`. It does not listen on the OpenVPN `tun` interface, so hosts on the corporate VPN cannot reach it.
-- `agents_net` is internal. Containers on it have no internet access.
-- An agent container on `agents_net` can reach only the services on `agents_net`. Later services for agents, for example `llm-proxy` and `opensearch-mcp`, can also join `agents_net`.
-- The env file is not in `../secrets`. The upstream compose file mounts all of `../secrets` into `app`, so `app` could read a file there.
-- The bridge uses port 8090 because `app` already uses port 8080 in the same namespace.
-- The services address each other by static IP. VPN DNS can replace `resolv.conf`, so Docker DNS names can stop working.
+- Listen on the internal-network address only, not on the VPN interface, so hosts on the VPN cannot reach the bridge.
+- Use static IPs between services: VPN DNS can replace `resolv.conf`, and Docker DNS names can stop working.
 - Do not publish port 8090 on the host.
-- The Adminer URL in the bridge config might need an IP address. If the host name resolves only through VPN DNS, set `VPN_USE_PUSHED_DNS` on the `vpn` service. This is the same caveat as for the app.
+- If the Adminer host name resolves only through VPN DNS, use its IP address in the bridge config, or let the VPN container use the pushed DNS.
 
 ### Security notes
 
